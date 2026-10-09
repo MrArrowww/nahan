@@ -1,11114 +1,9335 @@
-import { connect } from "cloudflare:sockets";
+// CFnew - 终端 v3.1
+// 版本: v3.1 
+import { connect as 连接 } from 'cloudflare:sockets';
+const 基础64文本解码器 = new TextDecoder();
+function 解码64(文本) {
+  const 二进制 = atob(文本);
+  const 字节 = new Uint8Array(二进制.length);
+  for (let 索引 = 0; 索引 < 二进制.length; 索引++) 字节[索引] = 二进制.charCodeAt(索引);
+  return 基础64文本解码器.decode(字节);
+}
+let 认证令牌 = '351c9981-04b6-4103-aa4b-864aa9c91469';
+let 回退地址 = '';
+let 代理5配置 = '';
+let 自定义优选地址列表 = [];
+let 自定义优选域名列表 = [];
+let 启用代理降级 = false;
+let 仅走代理 = false;
+let 禁用非传输层安全 = false;
+let 禁用优选 = false;
+let 启用地区匹配 = true;
+let 当前工作器地区 = '';
+let 手动工作器地区 = '';
+let 优选地址源 = '';
+let 自定义路径 = '';
+let 启用明文 = true;
+let 启用木马 = false;
+let 启用扩展传输 = false;
+let 传输路径 = '';
+// 启用ECH功能（true启用，false禁用）
+let 启用加密客户端问候 = false;
+// 自定义DNS服务器（默认：https://223.5.5.5/dns-query）
+let 自定义域名系统 = 'https://223.5.5.5/dns-query';
+// 自定义ECH域名（默认：cloudflare-ech.com）
+let 自定义加密客户端问候域名 = 'cloudflare-ech.com';
+let 自定义应用层协议协商 = '';
+let 订阅转换接口 = 解码64('aHR0cHM6Ly91cmwudjEubWsvc3Vi');
+// 远程配置URL（硬编码）
+const 远程配置网址 = 'https://raw.githubusercontent.com/byJoey/test/refs/heads/main/tist.ini';
+let 启用优选域名 = true; // 优选域名默认关闭
+let 启用优选地址 = true;
+let 启用仓库优选 = true;
+let 启用原生地址 = false; // 原生地址默认关闭          
+// 家宽链式：cfnew 自己的节点当前置，落地换成住宅宽带
+let 启用家宽链式 = false;
 
-/*
- * Project Nahan (نهان) - IoT Device Telemetry Gateway
- * Handles real-time binary streams from remote sensor nodes.
- */
-
-const CURRENT_VERSION = "3.0.4";
-
-const getAlpha = () => String.fromCharCode(118, 108, 101, 115, 115);
-const getBeta = () => String.fromCharCode(116, 114, 111, 106, 97, 110);
-const getGamma = () => String.fromCharCode(99, 108, 97, 115, 104);
-
-const safeBtoa = (str) => {
-    try {
-        const bytes = new TextEncoder().encode(str);
-        let binary = "";
-        for (let i = 0; i < bytes.byteLength; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
-    } catch (e) {
-        return btoa(str);
-    }
+let 键值存储 = null;
+let 键值配置 = {};
+let 键值配置上次加载 = 0;
+const 键值缓存期限 = 30 * 1000; // 30秒缓存（短窗口内跳过版本检查）
+let 键值配置版本 = '';
+const 配置默认值 = {
+  wk: '',
+  ev: 'yes',
+  et: 'no',
+  ex: 'no',
+  ech: 'no',
+  tp: '',
+  customDNS: 'https://223.5.5.5/dns-query',
+  customECHDomain: 'cloudflare-ech.com',
+  alpn: '',
+  d: '',
+  p: '',
+  yx: '',
+  yxURL: '',
+  s: '',
+  homepage: '',
+  scu: 解码64('aHR0cHM6Ly91cmwudjEubWsvc3Vi'),
+  ena: 'no',
+  epd: 'yes',
+  epi: 'yes',
+  egi: 'yes',
+  ae: '',
+  rm: '',
+  qj: '',
+  dkby: 'no',
+  yxby: '',
+  ipv4: 'yes',
+  ipv6: 'yes',
+  ispMobile: 'yes',
+  ispUnicom: 'yes',
+  ispTelecom: 'yes',
+  jk: 'no'
 };
 
-// Accurate byte accounting (Sepidar-grade): real up+down bytes per tunnel.
-// Legacy estimate kept ONLY as a one-time migration for pre-existing rows:
-// 1GB per 6000 connections. Limits stay in req units (dashboard contract:
-// GB*6000), converted to bytes at comparison time, so thresholds are exact.
-// Hard-timeout fetch: every outbound fetch must be bounded, otherwise a
-// hanging origin (ubuntu/docker, ip-api, DoH, github, telegram, CF API)
-// leaves the request with no events in the loop -> Cloudflare 1101
-// ("never generate a response"). Same signature as fetch + timeoutMs.
-async function fetchT(url, init = {}, timeoutMs = 10000) {
-    // Bounded fetch: hard timeout so a hanging origin (ubuntu/docker,
-    // ip-api, DoH, github, telegram, CF API) can never leave the request
-    // with no events in the loop -> Cloudflare 1101. Caller abort signals
-    // are bridged into the internal controller, never replaced.
-    const timeout = Math.max(1, Number(timeoutMs) || 10000);
-    let controller = null;
-    let timer = null;
-    let callerSignal = null;
-    let onCallerAbort = null;
-    try {
-        if (typeof AbortController !== "undefined") {
-            controller = new AbortController();
-            callerSignal = init && init.signal ? init.signal : null;
-            if (callerSignal) {
-                if (callerSignal.aborted)
-                    controller.abort(callerSignal.reason);
-                else {
-                    onCallerAbort = () => {
-                        try {
-                            controller.abort(callerSignal.reason);
-                        } catch (e) {}
-                    };
-                    try {
-                        callerSignal.addEventListener("abort", onCallerAbort, {
-                            once: true,
-                        });
-                    } catch (e) {}
-                }
-            }
-            timer = setTimeout(() => {
-                try {
-                    controller.abort();
-                } catch (e) {}
-            }, timeout);
-            // NOTE: plain fetch() here on purpose — fetchT must never call
-            // itself (infinite recursion).
-            return await fetch(url, { ...init, signal: controller.signal });
-        }
-        return await fetch(url, { ...init });
-    } finally {
-        if (timer) {
-            try {
-                clearTimeout(timer);
-            } catch (e) {}
-        }
-        if (callerSignal && onCallerAbort) {
-            try {
-                callerSignal.removeEventListener("abort", onCallerAbort);
-            } catch (e) {}
-        }
-    }
-}
-const REQ_BYTES_EST = 1073741824 / 6000;
-function usageTotalBytes(u) {
-    try {
-        if (!u) return 0;
-        if (typeof u.bytes === "number" && u.bytes >= 0)
-            return Math.floor(u.bytes);
-        return Math.floor((u.reqs || 0) * REQ_BYTES_EST);
-    } catch (e) {
-        return 0;
-    }
-}
-function usageDailyBytes(u, today) {
-    try {
-        if (!u) return 0;
-        const day =
-            today || new Date().toISOString().split("T")[0];
-        if ((u.lastDay || "") !== day) return 0;
-        if (typeof u.dBytes === "number" && u.dBytes >= 0)
-            return Math.floor(u.dBytes);
-        return Math.floor((u.dReqs || 0) * REQ_BYTES_EST);
-    } catch (e) {
-        return 0;
-    }
-}
-function limitReqToBytes(limitReq) {
-    try {
-        return limitReq ? Math.floor(limitReq * REQ_BYTES_EST) : 0;
-    } catch (e) {
-        return 0;
-    }
+function 是否开启值(值, 默认启用 = false) {
+  if (值 === undefined || 值 === null || 值 === '') return 默认启用;
+  if (值 === true || 值 === false) return 值;
+  const 文本 = String(值).trim().toLowerCase();
+  if (文本 === 'yes' || 文本 === 'true' || 文本 === '1' || 文本 === 'on') return true;
+  if (文本 === 'no' || 文本 === 'false' || 文本 === '0' || 文本 === 'off') return false;
+  return 默认启用;
 }
 
-const SYSTEM_DEFAULTS = {
-    name: "",
-    apiRoute: "sync",
-    maintenanceHost: "https://www.ubuntu.com, https://www.docker.com",
-    backupRelay: "",
-    customRelay: "",
-    masterKey: "admin",
-    metricNode: "time.is",
-    cleanIps: "",
-    slaveNodes: "",
-    deviceId: "",
-    mode: "alpha",
-    agent: "chrome",
-    socketPorts: "443",
-    customDns: "https://cloudflare-dns.com/dns-query",
-    resolveIp: "1.1.1.1",
-    cascade: "",
-    enableOpt1: false,
-    enableOpt2: false,
-    tgToken: "",
-    tgChatId: "",
-    tgAdminId: "",
-    cfAccountId: "",
-    cfApiToken: "",
-    cfWorkerName: "",
-    isPaused: false,
-    silentAlerts: false,
-    githubRepo: "itsyebekhe/nahan",
-    nameStrategy: "default",
-    namePrefix: "Core",
-    tgBotLang: "fa",
-    users: [],
-    subUserAgent: "",
-    customPanelUrl: "",
-    limitTotalReq: 0,
-    expiryMs: 0,
-    linkedPanels: [],
-    hubPanelUrl: "",
-    syncApiKey: "",
-    panelApiKeys: [],
-    nat64Prefix: "",
-    enableDirectConfigs: false,
-    customRouting: "",
-    upstreamUri: "",
-    autoUpdate: false,
-    autoUpdateFormat: "encoded",
-    fakeConfigs: [
-        { name: "📊 {usage}", enabled: true },
-        { name: "📅 {expiry}", enabled: true },
-    ],
-    // Sepidar-grade hardening flags (safe defaults; merged, never wiped).
-    maintenanceMode: false,
-    allowRemoteDeploy: true,
-    autoPruneRelays: true,
+function 归一配置开关(值, 默认启用 = false) {
+  return 是否开启值(值, 默认启用) ? 'yes' : 'no';
+}
+
+function 获取配置开关值(键, 默认启用 = false, 备用值 = undefined) {
+  const 默认值 = 备用值 !== undefined ? 备用值 : (默认启用 ? 'yes' : 'no');
+  return 是否开启值(获取配置值(键, 默认值), 默认启用);
+}
+
+function 获取配置文本值(键, 默认值 = '', 备用值 = undefined) {
+  const 值 = 获取配置值(键, 备用值 !== undefined ? 备用值 : 默认值);
+  return 值 === undefined || 值 === null ? 默认值 : String(值);
+}
+
+function 整理有效配置(配置) {
+  const 快照 = {
+    ...配置默认值,
+    ...配置
+  };
+  ['ev', 'et', 'ex', 'ech', 'ena', 'epd', 'epi', 'egi', 'ipv4', 'ipv6', 'ispMobile', 'ispUnicom', 'ispTelecom', 'jk'].forEach(键 => {
+    快照[键] = 归一配置开关(快照[键], 是否开启值(配置默认值[键]));
+  });
+  if (快照.ev === 'no' && 快照.et === 'no' && 快照.ex === 'no') {
+    快照.ev = 'yes';
+  }
+  if (快照.ech === 'yes') {
+    快照.dkby = 'yes';
+  }
+  return 快照;
+}
+
+function 读取环境配置值(环境值, ...名称列表) {
+  if (!环境值) return undefined;
+  for (const 名称 of 名称列表) {
+    if (环境值[名称] !== undefined && 环境值[名称] !== null && 环境值[名称] !== '') {
+      return 环境值[名称];
+    }
+  }
+  return undefined;
+}
+
+function 获取环境配置快照(环境值 = {}) {
+  const 映射 = {
+    wk: ['wk', 'WK'],
+    ev: ['ev', 'EV'],
+    et: ['et', 'ET'],
+    ex: ['ex', 'EX'],
+    ech: ['ech', 'ECH'],
+    tp: ['tp', 'TP'],
+    customDNS: ['customDNS', 'CUSTOMDNS', 'CUSTOM_DNS'],
+    customECHDomain: ['customECHDomain', 'CUSTOMECHDOMAIN', 'CUSTOM_ECH_DOMAIN'],
+    alpn: ['alpn', 'ALPN'],
+    d: ['d', 'D'],
+    p: ['p', 'P'],
+    yx: ['yx', 'YX'],
+    yxURL: ['yxURL', 'YXURL', 'YX_URL'],
+    s: ['s', 'S'],
+    homepage: ['homepage', 'HOMEPAGE'],
+    scu: ['scu', 'SCU'],
+    ena: ['ena', 'ENA'],
+    epd: ['epd', 'EPD'],
+    epi: ['epi', 'EPI'],
+    egi: ['egi', 'EGI'],
+    ae: ['ae', 'AE'],
+    rm: ['rm', 'RM'],
+    qj: ['qj', 'QJ'],
+    dkby: ['dkby', 'DKBY'],
+    yxby: ['yxby', 'YXBY'],
+    ipv4: ['ipv4', 'IPV4'],
+    ipv6: ['ipv6', 'IPV6'],
+    ispMobile: ['ispMobile', 'ISPMOBILE', 'ISP_MOBILE'],
+    ispUnicom: ['ispUnicom', 'ISPUNICOM', 'ISP_UNICOM'],
+    ispTelecom: ['ispTelecom', 'ISPTELECOM', 'ISP_TELECOM'],
+    jk: ['jk', 'JK']
+  };
+  const 快照 = {};
+  for (const [键, 名称列表] of Object.entries(映射)) {
+    const 值 = 读取环境配置值(环境值, ...名称列表);
+    if (值 !== undefined) 快照[键] = 值;
+  }
+  return 快照;
+}
+
+function 获取有效配置快照(环境值 = {}) {
+  return 整理有效配置({
+    ...获取环境配置快照(环境值),
+    ...键值配置
+  });
+}
+const 地区映射 = {
+  'HK': ['🇭🇰 香港', 'HK', 'Hong Kong'],
+  'US': ['🇺🇸 美国', 'US', 'United States'],
+  'SG': ['🇸🇬 新加坡', 'SG', 'Singapore'],
+  'JP': ['🇯🇵 日本', 'JP', 'Japan'],
+  'KR': ['🇰🇷 韩国', 'KR', 'South Korea'],
+  'DE': ['🇩🇪 德国', 'DE', 'Germany'],
+  'SE': ['🇸🇪 瑞典', 'SE', 'Sweden'],
+  'NL': ['🇳🇱 荷兰', 'NL', 'Netherlands'],
+  'FI': ['🇫🇮 芬兰', 'FI', 'Finland'],
+  'GB': ['🇬🇧 英国', 'GB', 'United Kingdom'],
+  'Oracle': ['甲骨文', 'Oracle'],
+  'DigitalOcean': ['数码海', 'DigitalOcean'],
+  'Vultr': ['Vultr', 'Vultr'],
+  'Multacom': ['Multacom', 'Multacom']
 };
-
-let sysConfig = { ...SYSTEM_DEFAULTS };
-let isolateStartTime = 0;
-let activeConnections = 0;
-// Circuit breaker (Sepidar-grade load shedding): when an isolate is
-// saturated, cheap static work is shed first so real tunnels survive.
-// Level 1: skip the ubuntu/docker origin fetch (serve 404 instead).
-// Level 2: also tarpit new WS handshakes + refuse non-browser sub refresh.
-let INFLIGHT_HTTP = 0;
-let OPEN_WS = 0;
-function breakerLevel() {
+// 官方直连地址池：内置实测可用地址，不依赖任何第三方域名
+// CF 是任播，同一地址在不同位置落到的机房不同，所以不按地区区分
+const 官方直连地址 = 解码64('MTcyLjcxLjIxOC4xOTAsMTYyLjE1OC4yMjguODcsMTYyLjE1OC4xODkuMTM0LDE2Mi4xNTguMjYuNjMsMTYyLjE1OC4yNS44NiwxNjIuMTU4LjI5LjIxNiwxNjIuMTU4LjIxOC4xNjAsMTYyLjE1OC4yMjcuMjE0LDE3Mi42OS4xMTguMTk4LDE3Mi42OS4xMTkuMTUw').split(',');
+function 取官方直连地址() {
+  const 命中 = 官方直连地址[Math.floor(Math.random() * 官方直连地址.length)];
+  return {
+    domain: 命中,
+    region: 'CF',
+    regionCode: 'CF',
+    port: 443
+  };
+}
+let 备用地址列表 = [{
+  domain: 解码64('UHJveHlJUC5ISy5DTUxpdXNzc3MubmV0'),
+  region: 'HK',
+  regionCode: 'HK',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5VUy5DTUxpdXNzc3MubmV0'),
+  region: 'US',
+  regionCode: 'US',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5TRy5DTUxpdXNzc3MubmV0'),
+  region: 'SG',
+  regionCode: 'SG',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5KUC5DTUxpdXNzc3MubmV0'),
+  region: 'JP',
+  regionCode: 'JP',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5LUi5DTUxpdXNzc3MubmV0'),
+  region: 'KR',
+  regionCode: 'KR',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5ERS5DTUxpdXNzc3MubmV0'),
+  region: 'DE',
+  regionCode: 'DE',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5TRS5DTUxpdXNzc3MubmV0'),
+  region: 'SE',
+  regionCode: 'SE',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5OTC5DTUxpdXNzc3MubmV0'),
+  region: 'NL',
+  regionCode: 'NL',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5GSS5DTUxpdXNzc3MubmV0'),
+  region: 'FI',
+  regionCode: 'FI',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5HQi5DTUxpdXNzc3MubmV0'),
+  region: 'GB',
+  regionCode: 'GB',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5PcmFjbGUuY21saXVzc3NzLm5ldA=='),
+  region: 'Oracle',
+  regionCode: 'Oracle',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5EaWdpdGFsT2NlYW4uQ01MaXVzc3NzLm5ldA=='),
+  region: 'DigitalOcean',
+  regionCode: 'DigitalOcean',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5WdWx0ci5DTUxpdXNzc3MubmV0'),
+  region: 'Vultr',
+  regionCode: 'Vultr',
+  port: 443
+}, {
+  domain: 解码64('UHJveHlJUC5NdWx0YWNvbS5DTUxpdXNzc3MubmV0'),
+  region: 'Multacom',
+  regionCode: 'Multacom',
+  port: 443
+}];
+const 直连域名列表 = [{
+  name: "cloudflare.182682.xyz",
+  domain: "cloudflare.182682.xyz"
+}, {
+  name: "speed.marisalnc.com",
+  domain: "speed.marisalnc.com"
+}, {
+  domain: "freeyx.cloudflare88.eu.org"
+}, {
+  domain: "bestcf.top"
+}, {
+  domain: "cdn.2020111.xyz"
+}, {
+  domain: "cfip.cfcdn.vip"
+}, {
+  domain: "cf.0sm.com"
+}, {
+  domain: "cf.090227.xyz"
+}, {
+  domain: "cf.zhetengsha.eu.org"
+}, {
+  domain: "cloudflare.9jy.cc"
+}, {
+  domain: "cf.zerone-cdn.pp.ua"
+}, {
+  domain: "cfip.1323123.xyz"
+}, {
+  domain: "cnamefuckxxs.yuchen.icu"
+}, {
+  domain: "cloudflare-ip.mofashi.ltd"
+}, {
+  domain: "115155.xyz"
+}, {
+  domain: "cname.xirancdn.us"
+}, {
+  domain: "f3058171cad.002404.xyz"
+}, {
+  domain: "8.889288.xyz"
+}, {
+  domain: "cdn.tzpro.xyz"
+}, {
+  domain: "cf.877771.xyz"
+}, {
+  domain: "xn--b6gac.eu.org"
+}];
+const 错误_无效数据 = atob('aW52YWxpZCBkYXRh');
+const 错误_无效用户 = atob('aW52YWxpZCB1c2Vy');
+const 错误_不支持命令 = atob('Y29tbWFuZCBpcyBub3Qgc3VwcG9ydGVk');
+const 错误_仅支持域名系统用户数据报 = atob('VURQIHByb3h5IG9ubHkgZW5hYmxlIGZvciBETlMgd2hpY2ggaXMgcG9ydCA1Mw==');
+const 错误_无效地址类型 = atob('aW52YWxpZCBhZGRyZXNzVHlwZQ==');
+const 错误_空地址 = atob('YWRkcmVzc1ZhbHVlIGlzIGVtcHR5');
+const 错误_网页套接字未打开 = atob('d2ViU29ja2V0LmVhZHlTdGF0ZSBpcyBub3Qgb3Blbg==');
+const 错误_无效标识字符串 = atob('U3RyaW5naWZpZWQgaWRlbnRpZmllciBpcyBpbnZhbGlk');
+const 错误_无效代理地址 = atob('SW52YWxpZCBTT0NLUyBhZGRyZXNzIGZvcm1hdA==');
+const 错误_代理无可用方法 = atob('bm8gYWNjZXB0YWJsZSBtZXRob2Rz');
+const 错误_代理需要认证 = atob('c29ja3Mgc2VydmVyIG5lZWRzIGF1dGg=');
+const 错误_代理认证失败 = atob('ZmFpbCB0byBhdXRoIHNvY2tzIHNlcnZlcg==');
+const 错误_代理连接失败 = atob('ZmFpbCB0byBvcGVuIHNvY2tzIGNvbm5lY3Rpb24=');
+const 错误_代理隧道失败 = atob('ZmFpbCB0byBvcGVuIHByb3h5IHR1bm5lbA==');
+const 错误_代理响应异常 = atob('aW52YWxpZCBwcm94eSByZXNwb25zZQ==');
+const 前缀_套接字5 = atob('c29ja3M1Oi8v');
+const 前缀_套接字 = atob('c29ja3M6Ly8=');
+const 前缀_超文本 = atob('aHR0cDovLw==');
+const 前缀_安全超文本 = atob('aHR0cHM6Ly8=');
+const 文本_连接方法 = atob('Q09OTkVDVA==');
+const 文本_协议版本 = atob('IEhUVFAvMS4x');
+const 文本_主机头 = atob('SG9zdDog');
+const 文本_代理认证头 = atob('UHJveHktQXV0aG9yaXphdGlvbjogQmFzaWMg');
+const 文本_代理保持 = atob('UHJveHktQ29ubmVjdGlvbjogS2VlcC1BbGl2ZQ==');
+const 文本_用户代理头 = atob('VXNlci1BZ2VudDogTW96aWxsYS81LjA=');
+const 文本_换行 = atob('DQo=');
+const 文本_响应前缀 = atob('SFRUUC8=');
+const 代理种类_套接字5 = 'p5';
+const 代理种类_隧道 = 'pt';
+const 代理种类_安全隧道 = 'pts';
+let 已解析代理5配置 = {};
+let 是否代理已启用 = false;
+const 地址类型_四版 = 1;
+const 地址类型_网址 = 2;
+const 地址类型_六版 = 3;
+const 传输块大小 = 64 * 1024;
+const 传输下载包大小 = 32 * 1024;
+const 传输下载尾部 = 512;
+const 传输下载延迟 = 0;
+const 传输上传包大小 = 16 * 1024;
+const 传输上传队列上限 = 256 * 1024;
+const 传输连接竞速数 = 2;
+const 首字节超时 = 3500;
+const 共享解码器 = new TextDecoder();
+const 唯一标识字节缓存 = new Map();
+function 是否有效格式(字符串) {
+  const 用户正则 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return 用户正则.test(字符串);
+}
+function 是否有效地址(地址792) {
+  const 值4正则 = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+  if (值4正则.test(地址792)) return true;
+  const 值6正则 = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/;
+  if (值6正则.test(地址792)) return true;
+  const 值6值正则 = /^::1$|^::$|^(?:[0-9a-fA-F]{1,4}:)*::(?:[0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{1,4}$/;
+  if (值6值正则.test(地址792)) return true;
+  return false;
+}
+function 创建节点命名器(跳过 = false) {
+  // 如果配置了 yxURL，则跳过编号
+  const 值跳过 = typeof 优选地址源 !== 'undefined' && 优选地址源 && 优选地址源.trim();
+  let 跳过编号791 = 值跳过 || 跳过;
+  const 计数器组790 = {};
+  function 设置跳过编号(本地值789) {
+    if (!值跳过) {
+      跳过编号791 = 本地值789;
+    }
+  }
+  function 处理命名器(基础名称, 节点名称788 = null) {
+    if (跳过编号791 || 基础名称 && 基础名称.includes('.')) {
+      return 节点名称788 || 基础名称;
+    }
+    if (!计数器组790[基础名称]) 计数器组790[基础名称] = 0;
+    计数器组790[基础名称]++;
+    const 索引787 = String(计数器组790[基础名称]).padStart(2, '0');
+    return `${节点名称788 || 基础名称}-${索引787}`;
+  }
+  return {
+    namer: 处理命名器,
+    setSkipNumbering: 设置跳过编号
+  };
+}
+function 规范化节点主机(主机786) {
+  return String(主机786 || '').trim().replace(/^\[([^\]]+)\]$/, '$1');
+}
+function 处理值节点别名部分(值785, 回退 = 'Node') {
+  let 文本784 = String(值785 || '').trim();
+  if (!文本784 || /^自定义优选-/i.test(文本784)) 文本784 = 回退;
+  文本784 = 文本784.replace(/^\[([^\]]+)\]$/, '$1').replace(/^https?:\/\//i, '').replace(/[/?#].*$/, '').replace(/\s+/g, '_');
+  return 文本784 || 回退;
+}
+function 获取值节点别名基础(项目783) {
+  const 主机782 = 规范化节点主机(项目783?.ip || 项目783?.domain || '');
+  if (主机782 && 主机782.includes(':') && /^[0-9a-fA-F:.]+$/.test(主机782)) return 'IPv6优选';
+  if (主机782 && !是否有效地址(主机782)) return '优选域名';
+  const 本地值781 = 处理值节点别名部分(项目783?.isp || 项目783?.name || '', 'IPv4优选');
+  const 机房780 = 处理值节点别名部分(项目783?.colo || '', '');
+  return 机房780 ? `${本地值781}-${机房780}` : 本地值781;
+}
+function 创建值节点命名器(跳过编号779 = false) {
+  const 计数器组 = {};
+  return 项目778 => {
+    const 基础 = 获取值节点别名基础(项目778);
+    if (跳过编号779) return 基础;
+    计数器组[基础] = (计数器组[基础] || 0) + 1;
+    return `${基础}-${String(计数器组[基础]).padStart(2, '0')}`;
+  };
+}
+function 规范化应用层协议协商(值777) {
+  const 本地值776 = ['', 'h3', 'h2', 'http/1.1', 'h3,h2', 'h2,http/1.1', 'h3,h2,http/1.1'];
+  const 应用层协议协商775 = String(值777 || '').trim();
+  return 本地值776.includes(应用层协议协商775) ? 应用层协议协商775 : '';
+}
+function 处理值应用层协议协商值(参数774) {
+  const 应用层协议协商 = 规范化应用层协议协商(自定义应用层协议协商);
+  if (应用层协议协商) 参数774.set('alpn', 应用层协议协商);
+}
+async function 处理值键值值(本地值773) {
+  const 键值绑定 = 本地值773.C || 本地值773.c;
+  if (键值绑定) {
     try {
-        if (INFLIGHT_HTTP > 200 || OPEN_WS > 400) return 2;
-        if (INFLIGHT_HTTP > 100 || OPEN_WS > 200) return 1;
-    } catch (e) {}
-    return 0;
+      键值存储 = 键值绑定;
+      await 加载键值配置();
+    } catch (错误772) {
+      键值存储 = null;
+    }
+  } else {}
 }
-function sleepMs(ms) {
-    return new Promise((res) => setTimeout(res, ms));
+async function 加载键值配置(本地值771 = false) {
+  if (!键值存储) {
+    return;
+  }
+
+  // 短窗口内完全信任缓存，避免高频请求时打爆 KV
+  if (!本地值771 && 键值配置上次加载 > 0 && Date.now() - 键值配置上次加载 < 键值缓存期限) {
+    return;
+  }
+  try {
+    // 读取小体积的版本键 c_ver（约 13B），用于跨 isolate 缓存失效
+    let 本地值770 = '';
+    try {
+      本地值770 = (await 键值存储.get('c_ver')) || '';
+    } catch (忽略值769) {}
+
+    // 版本未变化且已有缓存，仅刷新时间戳，跳过完整读取
+    if (!本地值771 && 本地值770 && 本地值770 === 键值配置版本 && 键值配置 && Object.keys(键值配置).length > 0) {
+      键值配置上次加载 = Date.now();
+      return;
+    }
+    const 配置数据 = await 键值存储.get('c');
+    if (配置数据) {
+      键值配置 = JSON.parse(配置数据);
+    }
+    键值配置版本 = 本地值770;
+    键值配置上次加载 = Date.now();
+  } catch (错误768) {
+    // 读取失败时保留现有缓存，避免临时故障导致配置丢失
+    if (!键值配置) 键值配置 = {};
+  }
 }
-// Bounded wait with timer cleanup: unlike fire-and-forget sleepMs races,
-// the timer is always cleared, so connect/probe attempts under a reconnect
-// storm cannot pin isolates awake (a past 1101 contributor).
-function withTimeout(promise, ms, label) {
-    let timer = null;
-    const gate = new Promise((_, rej) => {
-        timer = setTimeout(() => {
-            try {
-                rej(new Error(label || "timeout"));
-            } catch (e) {}
-        }, ms);
+async function 保存键值配置() {
+  if (!键值存储) {
+    return;
+  }
+  try {
+    const 配置字符串 = JSON.stringify(键值配置);
+    await 键值存储.put('c', 配置字符串);
+    // 写入版本号，让其它 isolate 在下次请求时能立即看到变更
+    const 新值 = String(Date.now());
+    键值配置版本 = 新值;
+    try {
+      await 键值存储.put('c_ver', 新值);
+    } catch (忽略值767) {}
+    键值配置上次加载 = Date.now();
+  } catch (错误766) {
+    throw 错误766;
+  }
+}
+function 获取配置值(键765, 默认值 = '') {
+  if (键值配置[键765] !== undefined) {
+    return 键值配置[键765];
+  }
+  return 默认值;
+}
+async function 设置配置值(键764, 值763) {
+  键值配置[键764] = 值763;
+  await 保存键值配置();
+}
+async function 检查地址可用性(域名760, 端口759 = 443, 超时758 = 2000) {
+  try {
+    const 控制器757 = new AbortController();
+    const 超时标识756 = setTimeout(() => 控制器757.abort(), 超时758);
+    const 响应755 = await fetch(`https://${域名760}`, {
+      method: 'HEAD',
+      signal: 控制器757.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; CF-IP-Checker/1.0)'
+      }
     });
-    return Promise.race([promise, gate]).finally(() => {
-        try {
-            if (timer) clearTimeout(timer);
-        } catch (e) {}
-    });
+    clearTimeout(超时标识756);
+    return 响应755.status < 500;
+  } catch (错误754) {
+    return true;
+  }
 }
-// Hard deadlines for every TCP stage. cloudflare:sockets are not
-// AbortSignal-based, so fetch() timeouts do not cover them: each stage
-// needs its own deadline or a stalled relay hangs the request -> 1101.
-const TCP_OPEN_TIMEOUT_MS = 5000;
-const TCP_WRITE_TIMEOUT_MS = 5000;
-const TCP_FIRST_READ_TIMEOUT_MS = 7000;
-const UPSTREAM_WRITE_TIMEOUT_MS = 15000;
-const NAHAN_RUNNER_LEASE_TTL_MS = 120000;
-const UPSTREAM_QUEUE_MAX_BYTES = 4 * 1024 * 1024;
-const UPSTREAM_QUEUE_MAX_ITEMS = 256;
-function closeTcpSocketQuietly(socket) {
-    try {
-        if (socket && typeof socket.close === "function") socket.close();
-    } catch (e) {}
-}
-function releaseWriterQuietly(writer) {
-    try {
-        if (writer && typeof writer.releaseLock === "function")
-            writer.releaseLock();
-    } catch (e) {}
-}
-async function withDeadline(promise, timeoutMs, onTimeout, label = "operation") {
-    let timer = null;
-    let settled = false;
-    const timeoutPromise = new Promise((_, reject) => {
-        timer = setTimeout(() => {
-            if (settled) return;
-            try {
-                if (typeof onTimeout === "function") onTimeout();
-            } catch (e) {}
-            reject(new Error(`${label}-timeout`));
-        }, timeoutMs);
-    });
-    try {
-        return await Promise.race([promise, timeoutPromise]);
-    } finally {
-        settled = true;
-        if (timer) {
-            try {
-                clearTimeout(timer);
-            } catch (e) {}
-        }
+async function 获取值备用地址(工作器地区753 = '', 值地区匹配752 = 启用地区匹配) {
+  // 没指定地区（wk 留空=官方直连）时走内置地址，不依赖第三方域名
+  if (!工作器地区753 || 工作器地区753 === 'CF') {
+    return 取官方直连地址();
+  }
+  if (备用地址列表.length === 0) {
+    return 取官方直连地址();
+  }
+  const 可用地址列表751 = 备用地址列表.map(地址750 => ({
+    ...地址750,
+    available: true
+  }));
+  if (值地区匹配752 && 工作器地区753) {
+    const 值地址列表749 = 获取值地区值(工作器地区753, 可用地址列表751, 值地区匹配752);
+    if (值地址列表749.length > 0) {
+      const 已选地址748 = 值地址列表749[0];
+      return 已选地址748;
     }
+  }
+  const 已选地址 = 可用地址列表751[0];
+  return 已选地址;
 }
-async function writeSocketWithTimeout(
-    socket,
-    writer,
-    data,
-    timeoutMs = TCP_WRITE_TIMEOUT_MS,
-) {
-    if (!writer || typeof writer.write !== "function")
-        throw new Error("socket-writer-unavailable");
-    return await withDeadline(
-        writer.write(data),
-        timeoutMs,
-        () => closeTcpSocketQuietly(socket),
-        "socket-write",
-    );
+function 获取值值(地区747) {
+  const 值映射 = {
+    'US': ['SG', 'JP', 'KR'],
+    'SG': ['JP', 'KR', 'US'],
+    'JP': ['SG', 'KR', 'US'],
+    'KR': ['JP', 'SG', 'US'],
+    'DE': ['NL', 'GB', 'SE', 'FI'],
+    'SE': ['DE', 'NL', 'FI', 'GB'],
+    'NL': ['DE', 'GB', 'SE', 'FI'],
+    'FI': ['SE', 'DE', 'NL', 'GB'],
+    'GB': ['DE', 'NL', 'SE', 'FI']
+  };
+  return 值映射[地区747] || [];
 }
-let uuidUsage = new Map();
-let activeConns = new Map();
-let activeDeviceId = "";
-let configRegistry = new Map();
-
-let sysUsageCache = { users: {} };
-let lastSysUsageSync = 0;
-
-const CACHE_TTL_CONFIG = 10000;
-const CACHE_TTL_USAGE = 10000;
-const CACHE_TTL_BACKUP_IP = 30000;
-let sysConfigCacheTime = 0;
-let sysUsageCacheTime = 0;
-let backupIpCache = null;
-let backupIpCacheTime = 0;
-
-async function deployWorkerToCloudflare(accountId, apiToken, workerName, code) {
-    let currentBindings = [];
-    try {
-        const settingsRes = await fetchT(
-            `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}/settings`,
-            { headers: { Authorization: `Bearer ${apiToken}` } },
-            30000,
-        );
-        const settingsJson = await settingsRes.json();
-        if (settingsJson.success && settingsJson.result?.bindings) {
-            currentBindings = settingsJson.result.bindings;
-        }
-    } catch (e) {}
-
-    const metadata = {
-        main_module: "_worker.js",
-        compatibility_date: "2024-03-01",
-        compatibility_flags: ["allow_eval_during_startup"],
-        bindings: currentBindings,
-    };
-
-    const form = new FormData();
-    form.append(
-        "metadata",
-        new Blob([JSON.stringify(metadata)], { type: "application/json" }),
-    );
-    form.append(
-        "_worker.js",
-        new Blob([code], { type: "application/javascript+module" }),
-        "_worker.js",
-    );
-
-    return await fetchT(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${encodeURIComponent(workerName)}`,
-        {
-            method: "PUT",
-            headers: { Authorization: `Bearer ${apiToken}` },
-            body: form,
-        },
-        30000,
-    );
+function 获取值值值值(地区746) {
+  const 值值745 = 获取值值(地区746);
+  const 值值744 = ['US', 'SG', 'JP', 'KR', 'DE', 'SE', 'NL', 'FI', 'GB'];
+  return [地区746, ...值值745, ...值值744.filter(结果值743 => 结果值743 !== 地区746 && !值值745.includes(结果值743))];
 }
-
-async function d1Init(env) {
-    if (env.IOT_DB && !env.IOT_DB_INITIALIZED) {
-        try {
-            await env.IOT_DB.prepare(
-                "CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)",
-            ).run();
-            env.IOT_DB_INITIALIZED = true;
-        } catch (e) {
-            env.IOT_DB_INITIALIZED = true;
-        }
+function 获取值地区值(工作器地区, 可用地址列表, 值地区匹配 = 启用地区匹配) {
+  if (!值地区匹配 || !工作器地区) {
+    return 可用地址列表;
+  }
+  const 值值742 = 获取值值值值(工作器地区);
+  const 值地址列表741 = [];
+  for (const 地区 of 值值742) {
+    const 地区地址列表 = 可用地址列表.filter(地址740 => 地址740.regionCode === 地区);
+    值地址列表741.push(...地区地址列表);
+  }
+  return 值地址列表741;
+}
+function 解析地址值端口(输入) {
+  if (输入.includes('[') && 输入.includes(']')) {
+    const 本地值739 = 输入.match(/^\[([^\]]+)\](?::(\d+))?$/);
+    if (本地值739) {
+      return {
+        address: 本地值739[1],
+        port: 本地值739[2] ? parseInt(本地值739[2], 10) : null
+      };
     }
-}
-async function d1Get(env, key) {
-    if (!env.IOT_DB) return null;
-    await d1Init(env);
-    try {
-        const { results } = await env.IOT_DB.prepare(
-            "SELECT value FROM kv_store WHERE key = ?",
-        )
-            .bind(key)
-            .all();
-        if (results && results.length > 0) return results[0].value;
-    } catch (e) {}
-    return null;
-}
-async function d1Put(env, key, value) {
-    if (!env.IOT_DB) return;
-    await d1Init(env);
-    try {
-        await env.IOT_DB.prepare(
-            "INSERT INTO kv_store (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        )
-            .bind(key, value)
-            .run();
-    } catch (e) {}
-}
+  }
+  const 值值索引738 = 输入.lastIndexOf(':');
+  if (值值索引738 > 0) {
+    const 地址737 = 输入.substring(0, 值值索引738);
+    const 端口字符串 = 输入.substring(值值索引738 + 1);
+    const 端口736 = parseInt(端口字符串, 10);
 
-async function cachedD1Put(env, key, value) {
-    await d1Put(env, key, value);
-    if (key === "sys_config") sysConfigCacheTime = 0;
-    else if (key === "sys_usage") sysUsageCacheTime = 0;
-    else if (key === "backup_ip") backupIpCacheTime = 0;
-}
-// Strict variant: failures propagate to the caller instead of being
-// swallowed. Burial/resurrection MUST use this: a silent persist failure
-// after live rotation was already changed means unrecoverable loss.
-async function d1PutStrict(env, key, value) {
-    if (!env.IOT_DB) throw new Error("d1-unavailable");
-    await d1Init(env);
-    await env.IOT_DB.prepare(
-        "INSERT INTO kv_store (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-    )
-        .bind(key, value)
-        .run();
-}
-
-function sha224Hex(m) {
-    const msg = new TextEncoder().encode(m);
-    const K = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
-        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
-        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
-        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    ];
-    let H = [
-        0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511,
-        0x64f98fa7, 0xbefa4fa4,
-    ];
-    const words = [];
-    const n = Math.ceil((msg.length + 9) / 64) * 16;
-    for (let i = 0; i < n; i++) words[i] = 0;
-    for (let i = 0; i < msg.length; i++)
-        words[i >> 2] |= msg[i] << (24 - (i % 4) * 8);
-    words[msg.length >> 2] |= 0x80 << (24 - (msg.length % 4) * 8);
-    words[n - 1] = msg.length * 8;
-    const W = [];
-    for (let i = 0; i < n; i += 16) {
-        let [a, b, c, d, e, f, g, h] = H;
-        for (let j = 0; j < 64; j++) {
-            if (j < 16) W[j] = words[i + j];
-            else {
-                let w15 = W[j - 15],
-                    w2 = W[j - 2];
-                let s0 =
-                    ((w15 >>> 7) | (w15 << 25)) ^
-                    ((w15 >>> 18) | (w15 << 14)) ^
-                    (w15 >>> 3);
-                let s1 =
-                    ((w2 >>> 17) | (w2 << 15)) ^
-                    ((w2 >>> 19) | (w2 << 13)) ^
-                    (w2 >>> 10);
-                W[j] = (W[j - 16] + s0 + W[j - 7] + s1) >>> 0;
-            }
-            let S1 =
-                ((e >>> 6) | (e << 26)) ^
-                ((e >>> 11) | (e << 21)) ^
-                ((e >>> 25) | (e << 7));
-            let ch = (e & f) ^ (~e & g);
-            let temp1 = (h + S1 + ch + K[j] + W[j]) >>> 0;
-            let S0 =
-                ((a >>> 2) | (a << 30)) ^
-                ((a >>> 13) | (a << 19)) ^
-                ((a >>> 22) | (a << 10));
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = (S0 + maj) >>> 0;
-            h = g;
-            g = f;
-            f = e;
-            e = (d + temp1) >>> 0;
-            d = c;
-            c = b;
-            b = a;
-            a = (temp1 + temp2) >>> 0;
-        }
-        H[0] = (H[0] + a) >>> 0;
-        H[1] = (H[1] + b) >>> 0;
-        H[2] = (H[2] + c) >>> 0;
-        H[3] = (H[3] + d) >>> 0;
-        H[4] = (H[4] + e) >>> 0;
-        H[5] = (H[5] + f) >>> 0;
-        H[6] = (H[6] + g) >>> 0;
-        H[7] = (H[7] + h) >>> 0;
+    // address 含 ':' 说明是裸 IPv6（如 2001:db8::1），整体当地址，无端口
+    if (!地址737.includes(':') && !isNaN(端口736) && 端口736 > 0 && 端口736 <= 65535) {
+      return {
+        address: 地址737,
+        port: 端口736
+      };
     }
-    return H.slice(0, 7)
-        .map((v) => v.toString(16).padStart(8, "0"))
-        .join("");
+  }
+  return {
+    address: 输入,
+    port: null
+  };
 }
-const trojanHashCache = new Map();
-function getTrojanHash(uuid) {
-    if (trojanHashCache.has(uuid)) return trojanHashCache.get(uuid);
-    const hash = sha224Hex(uuid);
-    trojanHashCache.set(uuid, hash);
-    return hash;
-}
-
-function registerConfigEntry(uuid, userId, relayIp) {
-    const entry = { userId, relayIp: relayIp || "" };
-    configRegistry.set(uuid.replace(/-/g, "").toLowerCase(), entry);
-    const hashKey = getTrojanHash(uuid);
-    configRegistry.set(hashKey, entry);
-}
-
-function lookupConfigEntry(uuidHex) {
-    return configRegistry.get(uuidHex.toLowerCase()) || null;
-}
-
-function generateConfigUuid(originalUuid, relayIpIndex) {
-    const cleanUuid = originalUuid.replace(/-/g, "").toLowerCase();
-    const userPart = cleanUuid.substring(0, 24);
-    const relayPart = relayIpIndex.toString(16).padStart(8, "0");
-    const fullHex = userPart + relayPart;
-    return `${fullHex.substring(0, 8)}-${fullHex.substring(8, 12)}-${fullHex.substring(12, 16)}-${fullHex.substring(16, 20)}-${fullHex.substring(20, 32)}`;
-}
-
-function decodeConfigUuid(uuid) {
-    const cleanUuid = uuid.replace(/-/g, "").toLowerCase();
-    if (cleanUuid.length !== 32) return null;
-    const userFingerprint = cleanUuid.substring(0, 24);
-    const relayIpIndex = parseInt(cleanUuid.substring(24, 32), 16);
-    return { userFingerprint, relayIpIndex };
-}
-
-function isPanelApiKey(key) {
-    if (
-        !key ||
-        !sysConfig.panelApiKeys ||
-        !Array.isArray(sysConfig.panelApiKeys)
-    )
-        return false;
-    return sysConfig.panelApiKeys.some((k) => k.key === key);
-}
-
-function extractAuthKey(request, data) {
-    const authHeader = request.headers.get("Authorization") || "";
-    const authKey = authHeader.replace("Bearer ", "") || "";
-    let bodyKey = "";
-    if (data && typeof data === "object") bodyKey = data.key || "";
-    return authKey || bodyKey;
-}
-
-function isAuthorized(request, data) {
-    try {
-        const ip =
-            (request &&
-                request.headers &&
-                request.headers.get("cf-connecting-ip")) ||
-            "Unknown";
-        if (authBlocked(ip)) return false;
-        const key = extractAuthKey(request, data);
-        const ok =
-            key === sysConfig.masterKey || isPanelApiKey(key);
-        if (!ok) authFail(ip);
-        return ok;
-    } catch (e) {
-        return false;
-    }
-}
-
-function generateApiKey(name) {
-    const id = crypto.randomUUID();
-    const raw = `nahan_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-    const key = raw;
-    return {
-        id,
-        name: name || "Unnamed Key",
-        key,
-        createdAt: Date.now(),
-        lastUsed: null,
-    };
-}
-
-function trackUsage(uuid, bytes, env, ctx) {
-    if (!sysUsageCache) sysUsageCache = { users: {} };
-    if (!sysUsageCache.users) sysUsageCache.users = {};
-    if (!sysUsageCache.users[uuid])
-        sysUsageCache.users[uuid] = {
-            reqs: 0,
-            dReqs: 0,
-            bytes: 0,
-            dBytes: 0,
-            lastDay: new Date().toISOString().split("T")[0],
-        };
-
-    let u = sysUsageCache.users[uuid];
-    let today = new Date().toISOString().split("T")[0];
-    if (u.lastDay !== today) {
-        u.dReqs = 0;
-        u.dBytes = 0;
-        u.lastDay = today;
-    }
-    if (u.reqs === undefined) u.reqs = 0;
-    if (u.dReqs === undefined) u.dReqs = 0;
-    // One-time migration for rows written before byte accounting existed.
-    if (typeof u.bytes !== "number" || u.bytes < 0)
-        u.bytes = Math.floor((u.reqs || 0) * REQ_BYTES_EST);
-    if (typeof u.dBytes !== "number" || u.dBytes < 0)
-        u.dBytes =
-            u.lastDay === today
-                ? Math.floor((u.dReqs || 0) * REQ_BYTES_EST)
-                : 0;
-
-    if (bytes === 0) {
-        u.reqs += 1;
-        u.dReqs += 1;
-    } else if (typeof bytes === "number" && bytes > 0) {
-        u.bytes += Math.floor(bytes);
-        u.dBytes += Math.floor(bytes);
-    }
-
-    const now = Date.now();
-    if (now - lastSysUsageSync > 30000) {
-        lastSysUsageSync = now;
-        if (env && env.IOT_DB) {
-            let changedConfig = false;
-            if (sysConfig.users && sysConfig.users.length > 0) {
-                sysConfig.users.forEach((u) => {
-                    let uId = u.id.replace(/-/g, "").toLowerCase();
-                    let sysU = sysUsageCache.users[uId];
-                    if (!u.isPaused) {
-                        let reason = null;
-                        if (u.expiryMs && Date.now() > u.expiryMs) {
-                            reason = `Expiration date reached (${new Date(u.expiryMs).toLocaleDateString()})`;
-                        } else if (
-                            sysU &&
-                            u.limitTotalReq &&
-                            usageTotalBytes(sysU) >=
-                                limitReqToBytes(u.limitTotalReq)
-                        ) {
-                            let usedGB = (
-                                usageTotalBytes(sysU) / 1073741824
-                            ).toFixed(2);
-                            let limitGB = (
-                                limitReqToBytes(u.limitTotalReq) /
-                                1073741824
-                            ).toFixed(2);
-                            reason = `Traffic limit exceeded (${usedGB}GB / ${limitGB}GB)`;
-                        }
-                        if (reason) {
-                            u.isPaused = true;
-                            u.disabledReason = reason;
-                            u.disabledAt = Date.now();
-                            changedConfig = true;
-                            ctx?.waitUntil(
-                                logActivity(
-                                    env,
-                                    "User Auto-Disabled",
-                                    `User "${u.name}" (${u.id}) disabled: ${reason}`,
-                                ).catch(() => {}),
-                            );
-                            if (
-                                sysConfig.tgToken &&
-                                (sysConfig.tgAdminId || sysConfig.tgChatId)
-                            ) {
-                                const tgMsg = `⚠️ <b>User Auto-Disabled</b>\n\n👤 <b>User:</b> ${u.name}\n🆔 <b>ID:</b> <code>${u.id}</code>\n📝 <b>Reason:</b> ${reason}`;
-                                const notifyChatId =
-                                    sysConfig.tgAdminId || sysConfig.tgChatId;
-                                ctx?.waitUntil(
-                                    fetchT(
-                                        `https://api.telegram.org/bot${sysConfig.tgToken}/sendMessage`,
-                                        {
-                                            method: "POST",
-                                            headers: {
-                                                "Content-Type":
-                                                    "application/json",
-                                            },
-                                            body: JSON.stringify({
-                                                chat_id: notifyChatId,
-                                                text: tgMsg,
-                                                parse_mode: "HTML",
-                                            }),
-                                        },
-                                    ).catch(() => {}),
-                                );
-                            }
-                        }
-                    }
-                });
-            }
-
-            if (changedConfig) {
-                ctx?.waitUntil(
-                    cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    ).catch(() => {}),
-                );
-            }
-            ctx?.waitUntil(
-                cachedD1Put(
-                    env,
-                    "sys_usage",
-                    JSON.stringify(sysUsageCache),
-                ).catch(() => {}),
-            );
-        }
-    }
-}
-
 export default {
-    async fetch(request, env, ctx) {
+  async fetch(请求735, 本地值734, 本地值733) {
+    try {
+      const 是否网页套接字 = 请求735.headers.get('Upgrade') === atob('d2Vic29ja2V0');
+      const 是否值732 = 请求735.method === 'POST';
+      const 请求网址731 = new URL(请求735.url);
+      const 路径值730 = 请求网址731.pathname.split('/').filter(参数值729 => 参数值729);
+      if (!是否网页套接字 && !是否值732 && 请求网址731.pathname !== '/') {
+        const 值值728 = (本地值734.u || 本地值734.U || '').toLowerCase();
+        const 值值727 = (本地值734.d || 本地值734.D || '').toLowerCase();
+        const 首次值 = 路径值730[0] || '';
+        const 清理值 = 值值727.startsWith('/') ? 值值727.substring(1) : 值值727;
+        if (首次值 !== 值值728 && (清理值 ? 首次值 !== 清理值 : false)) {
+          return new Response('Not Found', {
+            status: 404
+          });
+        }
+      }
+      await 处理值键值值(本地值734);
+      认证令牌 = (本地值734.u || 本地值734.U || 认证令牌).toLowerCase();
+      const 值路径 = (本地值734.d || 本地值734.D || 认证令牌).toLowerCase();
+      const 本地值726 = 获取配置值('p', 本地值734.p || 本地值734.P);
+      let 值自定义地址 = false;
+      const 手动地区725 = 获取配置值('wk', 本地值734.wk || 本地值734.WK);
+      if (手动地区725 && 手动地区725.trim()) {
+        手动工作器地区 = 手动地区725.trim().toUpperCase();
+        当前工作器地区 = 手动工作器地区;
+      } else if (本地值726 && 本地值726.trim()) {
+        值自定义地址 = true;
+        当前工作器地区 = 'CUSTOM';
+      } else {
+        // wk 留空 = 官方直连：直接用内置地址，不再探测地区去匹配第三方域名
+        当前工作器地区 = 'CF';
+      }
+      const 地区匹配控制724 = 获取配置文本值('rm', 配置默认值.rm, 本地值734.rm || 本地值734.RM);
+      启用地区匹配 = !(地区匹配控制724 && 地区匹配控制724.toLowerCase() === 'no');
+      const 值回退723 = 获取配置文本值('p', 配置默认值.p, 本地值734.p || 本地值734.P);
+      回退地址 = 值回退723 ? 值回退723.trim() : '';
+      代理5配置 = 获取配置文本值('s', 配置默认值.s, 本地值734.s || 本地值734.S);
+      if (代理5配置) {
         try {
-            if (!isolateStartTime) isolateStartTime = Date.now();
-            try {
-                INFLIGHT_HTTP++;
-            } catch (e) {}
-            // NOTE: INFLIGHT_HTTP is decremented in the fetch finally block
-            // at the end of this handler, never here: decrementing it in a
-            // microtask right after increment made the breaker permanently
-            // blind (always ~0) so load shedding never engaged.
-            if (configRegistry.size > 10000) { configRegistry.clear(); trojanHashCache.clear(); }
-            await loadSysConfig(env, ctx);
-            // Background self-healing sweep (throttled): dead-relay probes
-            // + graveyard re-probes run in waitUntil, never blocking responses.
-            try {
-                const nowRs = Date.now();
-                if (nowRs - lastRelaySweep > 60000) {
-                    lastRelaySweep = nowRs;
-                    if (ctx && typeof ctx.waitUntil === "function") {
-                        ctx.waitUntil(
-                            (async () => {
-                                try {
-                                    await probeDeadRelays(env);
-                                } catch (e) {}
-                                try {
-                                    await probeGraveyard(env);
-                                } catch (e) {}
-                            })(),
-                        );
-                    }
-                }
-            } catch (e) {}
-            activeDeviceId =
-                sysConfig.deviceId || generateHardwareId(sysConfig.apiRoute);
-
-            const url = new URL(request.url);
-            const upgradeHeader = request.headers.get("Upgrade");
-            const isTelemetryStream =
-                upgradeHeader && upgradeHeader.toLowerCase() === "websocket";
-
-            let reqPath = url.pathname;
-            if (reqPath.endsWith("/") && reqPath.length > 1)
-                reqPath = reqPath.slice(0, -1);
-
-            const routes = {
-                data: `/${encodeURI(sysConfig.apiRoute)}`,
-                dash: `/${encodeURI(sysConfig.apiRoute)}/dash`,
-                auth: `/${encodeURI(sysConfig.apiRoute)}/api/auth`,
-                sync: `/${encodeURI(sysConfig.apiRoute)}/api/sync`,
-                tg: `/${encodeURI(sysConfig.apiRoute)}/tg`,
-                syncPanel: `/${encodeURI(sysConfig.apiRoute)}/tg/sync_panel`,
-                logs: `/${encodeURI(sysConfig.apiRoute)}/api/logs`,
-                users: `/${encodeURI(sysConfig.apiRoute)}/api/users`,
-                stats: `/${encodeURI(sysConfig.apiRoute)}/api/stats`,
-                update: `/${encodeURI(sysConfig.apiRoute)}/api/update`,
-                apiKeys: `/${encodeURI(sysConfig.apiRoute)}/api/keys`,
-            };
-
-            const isSyncRoute = reqPath.endsWith("/api/sync");
-            const isUsersRoute =
-                reqPath === routes.users || reqPath.endsWith("/api/users");
-            const isStatsRoute =
-                reqPath === routes.stats || reqPath.endsWith("/api/stats");
-            const isUpdateRoute =
-                reqPath === routes.update || reqPath.endsWith("/api/update");
-            const isApiKeysRoute =
-                reqPath === routes.apiKeys || reqPath.endsWith("/api/keys");
-            const isAuthorizedRoute =
-                reqPath === routes.data ||
-                reqPath === routes.dash ||
-                reqPath === routes.auth ||
-                reqPath === routes.sync ||
-                reqPath === routes.tg ||
-                reqPath === routes.syncPanel ||
-                reqPath === routes.logs ||
-                isSyncRoute ||
-                isUsersRoute ||
-                isStatsRoute ||
-                isUpdateRoute ||
-                isApiKeysRoute;
-
-            if (!isTelemetryStream && !isAuthorizedRoute) {
-                return serveMaintenancePage(request, url);
-            }
-
-            // Maintenance mode (sysConfig.maintenanceMode): admin APIs stay
-            // open, already-open tunnels are unaffected (they are upgraded),
-            // but new tunnels and sub refreshes get a polite 503.
-            // Toggle by POSTing {"key":...,"config":{"maintenanceMode":true}}
-            // to /<apiRoute>/api/sync (merged, survives dashboard syncs).
-            if (
-                sysConfig.maintenanceMode &&
-                (isTelemetryStream || reqPath === routes.data)
-            ) {
-                if (isTelemetryStream)
-                    return new Response(null, { status: 503 });
-                return new Response(
-                    "Maintenance in progress, retry later",
-                    {
-                        status: 503,
-                        headers: { "Retry-After": "120" },
-                    },
-                );
-            }
-
-            if (!isTelemetryStream) {
-                if (reqPath === routes.dash) {
-                    const dashboardUrl = env.DASHBOARD_URL || 'https://raw.githubusercontent.com/itsyebekhe/nahan/main/dashboard.html';
-                    try {
-                        const resp = await fetchT(dashboardUrl);
-                        let html = await resp.text();
-                        html = html.replace(/__CURRENT_VERSION__/g, CURRENT_VERSION);
-                        if (env.IOT_DB !== undefined) {
-                            html = html.replace('__HAS_DB_WARNING__', '');
-                        } else {
-                            html = html.replace('__HAS_DB_WARNING__', '<div class="mb-5 p-4 rounded-2xl flex items-start gap-3" style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);"><span style="color:#f87171;">&#9888;&#65039;</span><span class="text-sm" style="color:#fca5a5;" data-i18n="missing_db">Database not connected. Settings won\'t be saved.</span></div>');
-                        }
-                        return new Response(html, {
-                            headers: { "Content-Type": "text/html;charset=utf-8" },
-                        });
-                    } catch (e) {
-                        return new Response('Failed to load dashboard', { status: 502 });
-                    }
-                }
-                if (reqPath === routes.auth) {
-                    if (request.method !== "POST")
-                        return new Response("405", { status: 405 });
-                    return await handleAuth(request, url.hostname, ctx, env);
-                }
-                if (reqPath === routes.sync || isSyncRoute) {
-                    if (request.method === "OPTIONS") {
-                        return new Response(null, {
-                            status: 204,
-                            headers: {
-                                "Access-Control-Allow-Origin": "*",
-                                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                                "Access-Control-Allow-Headers":
-                                    "Content-Type, Authorization",
-                                "Access-Control-Max-Age": "86400",
-                            },
-                        });
-                    }
-                    if (request.method !== "POST")
-                        return new Response("405", { status: 405 });
-                    const syncRes = await handleConfigSync(request, env, ctx);
-                    syncRes.headers.set("Access-Control-Allow-Origin", "*");
-                    syncRes.headers.set(
-                        "Access-Control-Allow-Headers",
-                        "Content-Type, Authorization",
-                    );
-                    return syncRes;
-                }
-                if (reqPath === routes.logs) {
-                    if (request.method !== "POST" && request.method !== "GET")
-                        return new Response("405", { status: 405 });
-                    return await handleLogs(request, env);
-                }
-                if (isUsersRoute) {
-                    return await handleUsersApi(request, env, ctx);
-                }
-                if (isStatsRoute) {
-                    return await handleStatsApi(request, env);
-                }
-                if (isUpdateRoute) {
-                    return await handleUpdateApi(request, env, ctx);
-                }
-                if (isApiKeysRoute) {
-                    return await handleApiKeys(request, env, ctx);
-                }
-                if (reqPath === routes.syncPanel) {
-                    if (request.method !== "POST")
-                        return new Response("405", { status: 405 });
-                    return await handleSyncPanel(request, env, ctx);
-                }
-                if (reqPath === routes.tg) {
-                    if (request.method !== "POST")
-                        return new Response("405", { status: 405 });
-                    return await handleTelegramWebhook(
-                        request,
-                        env,
-                        url.hostname,
-                        ctx,
-                    );
-                }
-                if (reqPath === routes.data) {
-                    const ua = (
-                        request.headers.get("User-Agent") || ""
-                    ).toLowerCase();
-                    const isCustomUaAllowed =
-                        sysConfig.subUserAgent &&
-                        sysConfig.subUserAgent.trim().length > 0 &&
-                        ua.includes(
-                            sysConfig.subUserAgent.trim().toLowerCase(),
-                        );
-                    const clientHost =
-                        request.headers.get("Host") || url.hostname;
-                    let targetSub = url.searchParams.get("sub");
-                    let hasMultiUser =
-                        sysConfig.users && sysConfig.users.length > 0;
-
-                    let targetUser = null;
-                    let isValidUser = false;
-                    if (hasMultiUser) {
-                        if (targetSub) {
-                            targetUser = sysConfig.users.find(
-                                (u) =>
-                                    u.name.toLowerCase() ===
-                                        targetSub.toLowerCase() ||
-                                    u.id === targetSub,
-                            );
-                            if (targetUser) isValidUser = true;
-                        }
-                    } else {
-                        isValidUser = true;
-                        targetUser = { id: activeDeviceId, name: "Default" };
-                    }
-
-                    const acceptHeader = (
-                        request.headers.get("Accept") || ""
-                    ).toLowerCase();
-                    const secFetchDest = (
-                        request.headers.get("Sec-Fetch-Dest") || ""
-                    ).toLowerCase();
-
-                    const isRealBrowser =
-                        (secFetchDest === "document" ||
-                            acceptHeader.includes("text/html")) &&
-                        (ua.includes("mozilla") ||
-                            ua.includes("chrome") ||
-                            ua.includes("safari") ||
-                            ua.includes("applewebkit") ||
-                            ua.includes("gecko") ||
-                            ua.includes("opera") ||
-                            ua.includes("edge")) &&
-                        !ua.includes("cla" + "sh") &&
-                        !ua.includes("si" + "ng-box") &&
-                        !ua.includes("v" + "2r" + "ay") &&
-                        !ua.includes("shadow" + "rocket") &&
-                        !ua.includes("quantum" + "ult") &&
-                        !ua.includes("surf" + "board") &&
-                        !ua.includes("sta" + "sh");
-
-                    if (isRealBrowser && !isCustomUaAllowed) {
-                        if (isValidUser) {
-                            const subscriptionUrl = env.SUBSCRIPTION_URL || 'https://raw.githubusercontent.com/itsyebekhe/nahan/main/subscription.html';
-                            try {
-                                const resp = await fetchT(subscriptionUrl);
-                                let html = await resp.text();
-                                // Compute dynamic values
-                                const idClean = targetUser.id.replace(/-/g, '').toLowerCase();
-                                const sysU = sysUsageCache?.users?.[idClean] || { reqs: 0, dReqs: 0, lastDay: '' };
-                                const totalReqs = sysU.reqs || 0;
-                                const todayDate = new Date().toISOString().split('T')[0];
-                                const dailyReqs = sysU.lastDay === todayDate ? (sysU.dReqs || 0) : 0;
-                                const limitTotal = targetUser.limitTotalReq || 0;
-                                const limitDaily = targetUser.limitDailyReq || 0;
-                                const totalBytesUsed = usageTotalBytes(sysU);
-                                const dailyBytesUsed = usageDailyBytes(sysU, todayDate);
-                                const limitTotalBytes = limitReqToBytes(limitTotal);
-                                const limitDailyBytes = limitReqToBytes(limitDaily);
-                                const totalGb = (totalBytesUsed / 1073741824).toFixed(2);
-                                const limitTotalGb = limitTotal ? (limitTotalBytes / 1073741824).toFixed(2) : '9999';
-                                const dailyGb = (dailyBytesUsed / 1073741824).toFixed(2);
-                                const limitDailyGb = limitDaily ? (limitDailyBytes / 1073741824).toFixed(2) : '9999';
-                                const totalPercent = limitTotal ? Math.min(100, (totalBytesUsed / limitTotalBytes) * 100).toFixed(1) : '0';
-                                const dailyPercent = limitDaily ? Math.min(100, (dailyBytesUsed / limitDailyBytes) * 100).toFixed(1) : '0';
-                                let expiryDateTxt = '2099-01-01';
-                                let isExpired = false;
-                                if (targetUser.expiryMs) {
-                                    expiryDateTxt = new Date(targetUser.expiryMs).toISOString().split('T')[0];
-                                    if (Date.now() > targetUser.expiryMs) isExpired = true;
-                                }
-                                let statusCode = 'active';
-                                if (targetUser.isPaused) statusCode = 'paused';
-                                else if (isExpired) statusCode = 'expired';
-                                else if (limitTotal && totalBytesUsed >= limitTotalBytes) statusCode = 'limit';
-                                else if (limitDaily && dailyBytesUsed >= limitDailyBytes) statusCode = 'dailyLimit';
-                                let cleanUrl = new URL(url.href);
-                                let panelUrlToUse = sysConfig.customPanelUrl;
-                                if (targetUser.userPanelUrl && targetUser.userPanelUrl.trim()) panelUrlToUse = targetUser.userPanelUrl.trim();
-                                if (panelUrlToUse) {
-                                    let customUrlStr = panelUrlToUse;
-                                    if (!customUrlStr.startsWith('http://') && !customUrlStr.startsWith('https://')) customUrlStr = 'https://' + customUrlStr;
-                                    try { const customUrl = new URL(customUrlStr); cleanUrl.protocol = customUrl.protocol; cleanUrl.host = customUrl.host; } catch(e) {}
-                                }
-                                cleanUrl.searchParams.delete('flag'); cleanUrl.searchParams.delete('format');
-                                cleanUrl.searchParams.delete('type'); cleanUrl.searchParams.delete('output'); cleanUrl.searchParams.delete('raw');
-                                const syncNormal = cleanUrl.href;
-                                const syncRaw = cleanUrl.href + (cleanUrl.href.includes('?') ? '&flag=a' : '?flag=a');
-                                // Total progress bar
-                                let totalProgress = '';
-                                if (limitTotal) {
-                                    totalProgress = `<div class="w-full rounded-full h-1.5 mt-3 overflow-hidden progress-bar-bg"><div class="h-1.5 rounded-full" style="background: var(--accent); width: ${totalPercent}%;"></div></div><p class="text-[10px] text-muted text-right mt-1.5" data-i18n="used">${totalPercent}% Used</p>`;
-                                } else {
-                                    totalProgress = '<p class="text-[10px] text-muted mt-2" data-i18n="unlimitedPlan">Unlimited Plan</p>';
-                                }
-                                // Daily progress bar
-                                let dailyProgress = '';
-                                if (limitDaily) {
-                                    dailyProgress = `<div class="w-full rounded-full h-1.5 mt-3 overflow-hidden progress-bar-bg"><div class="h-1.5 rounded-full" style="background: var(--amber-text); width: ${dailyPercent}%;"></div></div><p class="text-[10px] text-muted text-right mt-1.5" data-i18n="used">${dailyPercent}% Used</p>`;
-                                } else {
-                                    dailyProgress = '<p class="text-[10px] text-muted mt-2" data-i18n="noDailyLimit">No Daily Limit</p>';
-                                }
-                                // Replace placeholders
-                                html = html.replace(/__USER_NAME__/g, targetUser.name);
-                                html = html.replace(/__USER_ID__/g, targetUser.id);
-                                html = html.replace(/__STATUS_CODE__/g, statusCode);
-                                html = html.replace(/__TOTAL_GB__/g, totalGb);
-                                html = html.replace(/__LIMIT_TOTAL_GB__/g, limitTotalGb);
-                                html = html.replace(/__TOTAL_PERCENT__/g, totalPercent);
-                                html = html.replace(/__DAILY_GB__/g, dailyGb);
-                                html = html.replace(/__LIMIT_DAILY_GB__/g, limitDailyGb);
-                                html = html.replace(/__DAILY_PERCENT__/g, dailyPercent);
-                                html = html.replace(/__EXPIRY_DATE__/g, expiryDateTxt);
-                                html = html.replace(/__SYNC_NORMAL__/g, syncNormal);
-                                html = html.replace(/__SYNC_RAW__/g, syncRaw);
-                                html = html.replace(/__TOTAL_PROGRESS__/g, totalProgress);
-                                html = html.replace(/__DAILY_PROGRESS__/g, dailyProgress);
-                                return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-                            } catch (e) {
-                                return new Response('Failed to load subscription page', { status: 502 });
-                            }
-                        } else {
-                            return serveMaintenancePage(request, url);
-                        }
-                    }
-
-                    if (hasMultiUser && !isValidUser) {
-                        return new Response(
-                            "Error: Default profile sync is disabled when multi-user is active.",
-                            { status: 403 },
-                        );
-                    }
-
-                    // Breaker L2: shed client sub refreshes under extreme
-                    // load (browsers still get the info page above, open
-                    // tunnels are unaffected).
-                    try {
-                        if (breakerLevel() >= 2 && !isRealBrowser) {
-                            return new Response(
-                                "Server busy, retry later",
-                                {
-                                    status: 429,
-                                    headers: { "Retry-After": "60" },
-                                },
-                            );
-                        }
-                    } catch (e) {}
-
-                    const allowInsecure =
-                        url.searchParams.get("insecure") === "true" ||
-                        url.searchParams.get("allowInsecure") === "true" ||
-                        url.searchParams.get("allow_insecure") === "1" ||
-                        url.searchParams.get("allowInsecure") === "1";
-
-                    const resHeaders = new Headers();
-                    resHeaders.set("Cache-Control", "no-store");
-                    resHeaders.set("Access-Control-Allow-Origin", "*");
-
-                    let flag = (
-                        url.searchParams.get("flag") ||
-                        url.searchParams.get("format") ||
-                        url.searchParams.get("type") ||
-                        url.searchParams.get("output") ||
-                        ""
-                    ).toLowerCase();
-
-                    if (isValidUser && targetUser) {
-                        let idClean = targetUser.id
-                            .replace(/-/g, "")
-                            .toLowerCase();
-                        let sysU = sysUsageCache?.users?.[idClean] || {
-                            reqs: 0,
-                            dReqs: 0,
-                        };
-                        let totalReqs = sysU.reqs || 0;
-                        let limitTotal = 0;
-                        let expiryMs = 0;
-                        if (hasMultiUser) {
-                            limitTotal = targetUser.limitTotalReq || 0;
-                            expiryMs = targetUser.expiryMs || 0;
-                        } else {
-                            limitTotal = sysConfig.limitTotalReq || 0;
-                            expiryMs = sysConfig.expiryMs || 0;
-                        }
-
-                        let usedBytes = usageTotalBytes(sysU);
-                        let limitBytes = limitReqToBytes(limitTotal);
-                        let expireSec = expiryMs
-                            ? Math.floor(expiryMs / 1000)
-                            : 0;
-
-                        const subUserInfo = `upload=0; download=${usedBytes}; total=${limitBytes}; expire=${expireSec}`;
-                        resHeaders.set("Subscription-UserInfo", subUserInfo);
-                        resHeaders.set("subscription-userinfo", subUserInfo);
-                        resHeaders.set("Profile-Update-Interval", "12");
-                        resHeaders.set("profile-update-interval", "12");
-
-                        let cleanName = encodeURIComponent(targetUser.name);
-                        resHeaders.set(
-                            "Content-Disposition",
-                            `attachment; filename="${cleanName}"; filename*=UTF-8''${cleanName}`,
-                        );
-                    }
-
-                    // Determine subscription format
-                    let isClashYaml = false;
-                    let isSingboxJson = false;
-                    let isClashJson = false;
-                    let isVJson = false;
-
-                    // If flag is explicitly set, we respect it
-                    if (
-                        flag === "clash" ||
-                        flag === "yaml" ||
-                        flag === "meta" ||
-                        flag === "stash" ||
-                        flag === "clash-meta" ||
-                        flag === "y"
-                    ) {
-                        isClashYaml = true;
-                    } else if (flag === "b" || flag === "c_legacy") {
-                        isClashJson = true;
-                    } else if (
-                        flag === "sing" ||
-                        flag === "singbox" ||
-                        flag === "sing-box" ||
-                        flag === "sb" ||
-                        flag === "s" ||
-                        flag === "c" ||
-                        flag === "g"
-                    ) {
-                        isSingboxJson = true;
-                    } else if (flag === "vjson" || flag === "v") {
-                        isVJson = true;
-                    } else if (flag === "base64") {
-                        // Skip auto-detect to default to base64 plain-text subscription format
-                    } else if (flag === "a" || flag === "raw" || flag === "") {
-                        // Safe auto-detect for raw sync or no-flag links using target browser / client User-Agent
-                        if (
-                            ua.includes(getGamma()) ||
-                            ua.includes("meta") ||
-                            ua.includes("sta" + "sh") ||
-                            ua.includes("verge") ||
-                            ua.includes("mihomo") ||
-                            ua.includes("cfw") ||
-                            ua.includes("stash") ||
-                            ua.includes("clash")
-                        ) {
-                            isClashYaml = true;
-                        } else if (
-                            ua.includes("sing-box") ||
-                            ua.includes("singbox") ||
-                            ua.includes("hiddify") ||
-                            ua.includes("nekobox") ||
-                            ua.includes("sfa") ||
-                            ua.includes("karing")
-                        ) {
-                            isSingboxJson = true;
-                        }
-                    }
-
-                    if (isClashYaml) {
-                        resHeaders.set(
-                            "Content-Type",
-                            "text/yaml; charset=utf-8",
-                        );
-                        return new Response(
-                            await buildYamlProfile(clientHost, targetSub, allowInsecure, env),
-                            {
-                                headers: resHeaders,
-                            },
-                        );
-                    } else if (isSingboxJson) {
-                        resHeaders.set(
-                            "Content-Type",
-                            "application/json; charset=utf-8",
-                        );
-                        return new Response(
-                            JSON.stringify(
-                                await buildSingBoxJsonProfile(clientHost, targetSub, allowInsecure, env),
-                                null,
-                                2,
-                            ),
-                            {
-                                headers: resHeaders,
-                            },
-                        );
-                    } else if (isClashJson) {
-                        resHeaders.set(
-                            "Content-Type",
-                            "application/json; charset=utf-8",
-                        );
-                        return new Response(
-                            JSON.stringify(
-                                await buildClashJsonProfile(clientHost, targetSub, allowInsecure, env),
-                                null,
-                                2,
-                            ),
-                            {
-                                headers: resHeaders,
-                            },
-                        );
-                    } else if (isVJson) {
-                        resHeaders.set("Content-Type", "application/json; charset=utf-8");
-                        return new Response(JSON.stringify(await buildVJsonProfile(clientHost, targetSub, allowInsecure, env), null, 2), { headers: resHeaders });
-                    } else {
-                        resHeaders.set(
-                            "Content-Type",
-                            "text/plain; charset=utf-8",
-                        );
-                        const raw = await buildUriProfile(
-                            clientHost,
-                            targetSub,
-                            allowInsecure,
-                        );
-                        return new Response(safeBtoa(raw), {
-                            headers: resHeaders,
-                        });
-                    }
-                }
-            }
-
-            if (isTelemetryStream) {
-                if (sysConfig.isPaused)
-                    return new Response(null, { status: 503 });
-                // Reconnect-storm backoff before the handshake stacks up.
-                try {
-                    const wip =
-                        request.headers.get("cf-connecting-ip") || "unknown";
-                    const wr = wsRateCheck(wip);
-                    if (wr === "refuse")
-                        return new Response("Too many requests", {
-                            status: 429,
-                            headers: { "Retry-After": "60" },
-                        });
-                    if (wr === "tarpit") await sleepMs(1500);
-                } catch (e) {}
-                // Breaker L2: slow down reconnect storms instead of
-                // stacking more handshakes onto a saturated isolate.
-                try {
-                    if (breakerLevel() >= 2) await sleepMs(1000);
-                } catch (e) {}
-                let wsRelayIdx = -1;
-                try {
-                    const riParam = url.searchParams.get("ri");
-                    if (riParam !== null) wsRelayIdx = parseInt(riParam, 10);
-                } catch (e) {}
-                if (wsRelayIdx < 0) {
-                    try {
-                        const lastSeg = url.pathname.split("/").pop();
-                        if (lastSeg) {
-                            const num = parseInt(lastSeg, 10);
-                            if (!isNaN(num) && num >= 0) wsRelayIdx = num;
-                        }
-                    } catch (e) {}
-                }
-                if (wsRelayIdx < 0) {
-                    try {
-                        const lastSeg = url.pathname.split("/").pop();
-                        if (lastSeg) {
-                            const decoded = JSON.parse(atob(lastSeg));
-                            if (typeof decoded.relayIdx === "number")
-                                wsRelayIdx = decoded.relayIdx;
-                        }
-                    } catch (e) {}
-                }
-                return await processTelemetryStream(env, ctx, wsRelayIdx);
-            }
-
-            return new Response(null, { status: 404 });
-        } catch (err) {
-            return new Response(null, { status: 404 });
-        } finally {
-            try {
-                INFLIGHT_HTTP = Math.max(0, INFLIGHT_HTTP - 1);
-            } catch (e) {}
+          已解析代理5配置 = 解析代理配置(代理5配置);
+          是否代理已启用 = true;
+        } catch (错误722) {
+          是否代理已启用 = false;
         }
-    },
-    async scheduled(event, env, ctx) {
+      } else {
+        已解析代理5配置 = {};
+        是否代理已启用 = false;
+      }
+      const 自定义优选 = 获取配置值('yx', 本地值734.yx || 本地值734.YX);
+      if (自定义优选) {
         try {
-            await loadSysConfig(env, ctx);
-            if (sysConfig.autoUpdate && sysConfig.cfAccountId && sysConfig.cfApiToken && sysConfig.cfWorkerName) {
-                const repo = (sysConfig.githubRepo || "itsyebekhe/nahan")
-                    .replace(/https?:\/\/github\.com\//, "")
-                    .trim();
-                let remoteVer = null;
-                try {
-                    const res = await fetchT(`https://raw.githubusercontent.com/${repo}/main/version`);
-                    if (res.ok) {
-                        remoteVer = (await res.text()).trim();
-                    }
-                } catch (e) {}
-                
-                if (remoteVer && cmpVersions(CURRENT_VERSION, remoteVer) < 0) {
-                    try {
-                        let res = await fetchT(`https://raw.githubusercontent.com/${repo}/main/_worker.encode.js`);
-                        if (!res.ok) {
-                            res = await fetchT(`https://raw.githubusercontent.com/${repo}/main/_worker.encoded.js`);
-                            if (!res.ok) {
-                                res = await fetchT(`https://raw.githubusercontent.com/${repo}/main/_worker.js`);
-                            }
-                        }
-                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                        let latestCode = await res.text();
-                        const deployRes = await deployWorkerToCloudflare(
-                            sysConfig.cfAccountId,
-                            sysConfig.cfApiToken,
-                            sysConfig.cfWorkerName,
-                            latestCode
-                        );
-                        const deployResult = await deployRes.json();
-                        if (deployResult.success) {
-                            await logActivity(env, "Auto-Update Success", `Auto-updated to v${remoteVer} (encoded)`);
-                            if (sysConfig.linkedPanels && Array.isArray(sysConfig.linkedPanels)) {
-                                for (const p of sysConfig.linkedPanels) {
-                                    if (p && p.url && p.apiKey) {
-                                        let cleanUrl = p.url.trim();
-                                        if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
-                                            cleanUrl = "https://" + cleanUrl;
-                                        }
-                                        try {
-                                            const parsed = new URL(cleanUrl);
-                                            const targetUrl = `${parsed.protocol}//${parsed.host}/${encodeURI(sysConfig.apiRoute)}/api/update`;
-                                            ctx?.waitUntil(
-                                                fetchT(targetUrl, {
-                                                    method: "POST",
-                                                    headers: { "Content-Type": "application/json" },
-                                                    body: JSON.stringify({
-                                                        key: p.apiKey,
-                                                        action: "deploy",
-                                                        code: latestCode,
-                                                        force: true
-                                                    }),
-                                                    signal: AbortSignal.timeout(15000)
-                                                }).catch(() => {})
-                                            );
-                                        } catch (err) {}
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        await logActivity(env, "Auto-Update Failed", `Auto-update failed: ${e.message}`);
-                    }
-                }
+          const 优选列表721 = 自定义优选.split(',').map(项目720 => 项目720.trim()).filter(项目719 => 项目719);
+          自定义优选地址列表 = [];
+          自定义优选域名列表 = [];
+          优选列表721.forEach(项目718 => {
+            let 节点名称717 = '';
+            let 地址部分716 = 项目718;
+            if (项目718.includes('#')) {
+              const 部分列表715 = 项目718.split('#');
+              地址部分716 = 部分列表715[0].trim();
+              节点名称717 = 部分列表715[1].trim();
             }
-        } catch (e) {}
-    }
-};
-
-async function serveMaintenancePage(request, url) {
-    // Breaker L1: skip the origin fetch under load ( shards of ubuntu/docker
-    // fetches during floods kept isolates busy with zero user value).
-    try {
-        if (breakerLevel() >= 1) {
-            return new Response("Not Found", { status: 404 });
-        }
-    } catch (e) {}
-    let fakeList = sysConfig.maintenanceHost
-        ? sysConfig.maintenanceHost
-              .split(",")
-              .map((s) => s.trim())
-              .filter((s) => s)
-        : ["https://www.ubuntu.com"];
-    const clientIP = request.headers.get("cf-connecting-ip") || "0.0.0.0";
-    const ipHash = Array.from(clientIP).reduce(
-        (acc, char) => acc + char.charCodeAt(0),
-        0,
-    );
-    const targetStr = fakeList[ipHash % fakeList.length].startsWith("http")
-        ? fakeList[ipHash % fakeList.length]
-        : `https://${fakeList[ipHash % fakeList.length]}`;
-
-    try {
-        const targetUrl = new URL(targetStr);
-        if (url.pathname !== "/") targetUrl.pathname = url.pathname;
-        targetUrl.search = url.search;
-        const cleanHeaders = new Headers(request.headers);
-        cleanHeaders.set("Host", targetUrl.hostname);
-        cleanHeaders.delete("cf-connecting-ip");
-        cleanHeaders.delete("x-forwarded-for");
-        const fetchInit = {
-            method: request.method,
-            headers: cleanHeaders,
-            redirect: "follow",
-        };
-        if (request.method !== "GET" && request.method !== "HEAD")
-            fetchInit.body = request.body;
-        return await fetchT(new Request(targetUrl.toString(), fetchInit));
-    } catch (e) {
-        return new Response("Not Found", { status: 404 });
-    }
-}
-
-
-let sysConfigLoading = null;
-let sysUsageLoading = null;
-let backupIpLoading = null;
-
-function migrateSlaveNodesToLinkedPanels(config) {
-    let modified = false;
-    if (config && config.slaveNodes && config.slaveNodes.trim().length > 0) {
-        if (!config.linkedPanels) config.linkedPanels = [];
-        let nodes = config.slaveNodes
-            .split(/[\r\n,;]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-        let syncKey = config.syncApiKey || "";
-        nodes.forEach((node) => {
-            let cleanNode = node.replace(/^[a-zA-Z]+:\/\//, "").split("/")[0].split("@").pop().split(":")[0].toLowerCase();
-            let exists = config.linkedPanels.some((p) => {
-                if (!p || !p.url) return false;
-                let cleanUrl = p.url.replace(/^[a-zA-Z]+:\/\//, "").split("/")[0].split("@").pop().split(":")[0].toLowerCase();
-                return cleanUrl === cleanNode;
-            });
-            if (!exists) {
-                config.linkedPanels.push({ url: node, apiKey: syncKey });
-                modified = true;
-            }
-        });
-        config.slaveNodes = "";
-        modified = true;
-    }
-    return modified;
-}
-
-async function loadSysConfig(env, ctx = null) {
-    const now = Date.now();
-
-    if (env.IOT_DB) {
-        if (now - sysConfigCacheTime > CACHE_TTL_CONFIG) {
-            if (!sysConfigLoading) {
-                sysConfigLoading = d1Get(env, "sys_config")
-                    .then((stored) => {
-                        sysConfig = {
-                            ...SYSTEM_DEFAULTS,
-                            ...(stored ? JSON.parse(stored) : null),
-                        };
-                        sysConfigCacheTime = Date.now();
-                        if (migrateSlaveNodesToLinkedPanels(sysConfig)) {
-                            const promise = cachedD1Put(env, "sys_config", JSON.stringify(sysConfig));
-                            if (ctx && typeof ctx.waitUntil === "function") {
-                                ctx.waitUntil(promise.catch(() => {}));
-                            } else {
-                                promise.catch(() => {});
-                            }
-                        }
-                    })
-                    .catch(() => {
-                        sysConfig = { ...SYSTEM_DEFAULTS };
-                        sysConfigCacheTime = Date.now();
-                    })
-                    .finally(() => {
-                        sysConfigLoading = null;
-                    });
-            }
-            await sysConfigLoading;
-        }
-        if (now - sysUsageCacheTime > CACHE_TTL_USAGE) {
-            if (!sysUsageLoading) {
-                sysUsageLoading = d1Get(env, "sys_usage")
-                    .then((ustored) => {
-                        if (ustored) sysUsageCache = JSON.parse(ustored);
-                        else sysUsageCache = { users: {} };
-                        sysUsageCacheTime = Date.now();
-                    })
-                    .catch(() => {
-                        sysUsageCache = { users: {} };
-                        sysUsageCacheTime = Date.now();
-                    })
-                    .finally(() => {
-                        sysUsageLoading = null;
-                    });
-            }
-            await sysUsageLoading;
-        }
-    }
-
-    if (now - backupIpCacheTime > CACHE_TTL_BACKUP_IP) {
-        if (!backupIpLoading) {
-            backupIpLoading = (
-                env.IOT_DB ? d1Get(env, "backup_ip") : Promise.resolve(null)
-            )
-                .then((val) => {
-                    backupIpCache = val;
-                    backupIpCacheTime = Date.now();
-                })
-                .catch(() => {
-                    backupIpCacheTime = Date.now();
-                })
-                .finally(() => {
-                    backupIpLoading = null;
-                });
-        }
-        await backupIpLoading;
-    }
-    sysConfig.customRelay = backupIpCache ?? env.RELAY_IP ?? "";
-}
-
-async function fetchCloudflareUsage(accountId, apiToken) {
-    if (!accountId || !apiToken) return null;
-    try {
-        const d = new Date();
-        const currentDate = d.toISOString().split("T")[0] + "T00:00:00Z";
-
-        const query = `query GetDailyUsage($accountId: String!, $start: ISO8601DateTime!) { viewer { accounts(filter: {accountTag: $accountId}) { workersInvocationsAdaptive(limit: 1, filter: { datetime_geq: $start }) { sum { requests } } } } }`;
-        const variables = { accountId: accountId, start: currentDate };
-
-        const res = await fetchT(
-            "https://api.cloudflare.com/client/v4/graphql",
-            {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${apiToken}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ query, variables }),
-            },
-        );
-
-        const json = await res.json();
-        const reqs =
-            json?.data?.viewer?.accounts?.[0]?.workersInvocationsAdaptive?.[0]
-                ?.sum?.requests;
-        return typeof reqs === "number" ? reqs : null;
-    } catch (e) {
-        return null;
-    }
-}
-
-async function sendTelegramMessage(request, type, hostName) {
-    if (!sysConfig.tgToken || !(sysConfig.tgAdminId || sysConfig.tgChatId))
-        return;
-
-    const escMd = (s) => String(s).replace(/[_*()[`[]/g, "\\$&");
-
-    let usageStr = "نامشخص (0.00%)";
-    if (sysConfig.cfAccountId && sysConfig.cfApiToken) {
-        const reqs = await fetchCloudflareUsage(
-            sysConfig.cfAccountId,
-            sysConfig.cfApiToken,
-        );
-        if (reqs !== null) {
-            const limit = 100000;
-            const pct = ((reqs / limit) * 100).toFixed(2);
-            usageStr = `${reqs}/${limit} ${pct}%`;
-        }
-    }
-
-    const ip = request.headers.get("cf-connecting-ip") || "Unknown";
-    const cf = request.cf || {};
-    const country = cf.country || "Unknown";
-    const city = cf.city || "Unknown";
-    const asn = cf.asn || "Unknown";
-    const asOrg = cf.asOrganization || "Unknown";
-    const domain = request.headers.get("Host") || new URL(request.url).hostname;
-    const path = new URL(request.url).pathname;
-    const ua =
-        request.headers.get("User-Agent") || "حالا یوزرایجنت مارو نبینین";
-
-    const d = new Date();
-    const timeStr = new Intl.DateTimeFormat("fa-IR", {
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-    }).format(d);
-
-    const text =
-        `📌 نوع: ${escMd(type)}\n` +
-        `🌐 IP: ${escMd(ip)}\n` +
-        `📍 موقعیت: ${escMd(country)} ${escMd(city)}\n` +
-        `🏢 ASN: AS${escMd(asn)} ${escMd(asOrg)}\n` +
-        `🔗 دامنه: ${escMd(domain)}\n` +
-        `🔍 مسیر: ${escMd(path)}\n` +
-        `🤖 مرورگر: ${escMd(ua)}\n` +
-        `📅 زمان: ${escMd(timeStr)}\n` +
-        `📊 مصرف: ${usageStr}`;
-
-    const h = hostName || domain;
-    const langCode = sysConfig.tgBotLang || "fa";
-    const locT = (key) =>
-        botI18n[langCode]?.[key] || botI18n["en"]?.[key] || key;
-    const isPaused = sysConfig.isPaused || false;
-    const panelUrl = `https://${h}/${encodeURI(sysConfig.apiRoute)}/dash`;
-    const subUrl = `https://${h}/${sysConfig.apiRoute}`;
-    const inline_keyboard = [
-        [
-            { text: `📊 ${locT("dashboard")}`, callback_data: "sys_dashboard" },
-            { text: `📈 ${locT("statistics")}`, callback_data: "sys_stats" },
-        ],
-        [
-            {
-                text: `🔗 ${locT("btn_sub_link")}`,
-                callback_data: "get_sub_link",
-            },
-            {
-                text: `ℹ️ ${locT("panel_info")}`,
-                callback_data: "sys_panel_info",
-            },
-        ],
-        [
-            {
-                text: `🌐 ${langCode === "fa" ? "English 🇺🇸" : "فارسی 🇮🇷"}`,
-                callback_data: "sys_lang",
-            },
-            {
-                text: isPaused
-                    ? `▶️ ${locT("btn_resume")}`
-                    : `⏸️ ${locT("btn_pause")}`,
-                callback_data: "sys_toggle_status",
-            },
-        ],
-        [{ text: `🔑 ${locT("dash")}`, web_app: { url: panelUrl } }],
-    ];
-
-    const tgUrl = `https://api.telegram.org/bot${sysConfig.tgToken}/sendMessage`;
-    const notifyChatId = sysConfig.tgAdminId || sysConfig.tgChatId;
-    try {
-        await fetchT(tgUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                chat_id: notifyChatId,
-                text: text,
-                parse_mode: "Markdown",
-                reply_markup: /** @type {any} */ ({ inline_keyboard }),
-            }),
-        });
-    } catch (e) {}
-}
-
-async function logActivity(env, type, detail) {
-    if (!env || !env.IOT_DB) return;
-    try {
-        const ts = new Date().toISOString();
-        let logs = [];
-        const stored = await d1Get(env, "sys_logs");
-        if (stored) logs = JSON.parse(stored);
-        logs.unshift({ ts, type, detail });
-        if (logs.length > 50) logs = logs.slice(0, 50);
-        await d1Put(env, "sys_logs", JSON.stringify(logs));
-    } catch (e) {}
-}
-
-async function handleLogs(request, env) {
-    try {
-        if (request.method === "POST") {
-            const data = await request.json();
-            if (!isAuthorized(request, data))
-                return new Response(JSON.stringify({ success: false }), {
-                    status: 401,
-                });
-            let logs = [];
-            if (env.IOT_DB) {
-                const stored = await d1Get(env, "sys_logs");
-                if (stored) logs = JSON.parse(stored);
-            }
-            return new Response(JSON.stringify({ success: true, logs }), {
-                status: 200,
-            });
-        }
-        return new Response("OK", { status: 200 });
-    } catch (e) {
-        return new Response(JSON.stringify({ success: false }), {
-            status: 400,
-        });
-    }
-}
-
-async function handleUsersApi(request, env, ctx) {
-    try {
-        const url = new URL(request.url);
-        const method = request.method;
-        const userId = url.searchParams.get("id");
-        const action = url.searchParams.get("action");
-
-        const authHeader = request.headers.get("Authorization") || "";
-        const authKey =
-            authHeader.replace("Bearer ", "") ||
-            url.searchParams.get("key") ||
-            "";
-        let bodyKey = "";
-        if (method === "POST" || method === "PUT") {
-            try {
-                const body = await request.clone().json();
-                bodyKey = body.key || "";
-            } catch (e) {}
-        }
-        const isAuth =
-            authKey === sysConfig.masterKey ||
-            bodyKey === sysConfig.masterKey ||
-            isPanelApiKey(authKey) ||
-            isPanelApiKey(bodyKey);
-        const gateIp =
-            request.headers.get("cf-connecting-ip") || "Unknown";
-        if (authBlocked(gateIp)) {
-            return new Response(
-                JSON.stringify({ success: false, error: "Too many attempts" }),
-                {
-                    status: 429,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
-        if (!isAuth) {
-            authFail(gateIp);
-            return new Response(
-                JSON.stringify({ success: false, error: "Unauthorized" }),
-                {
-                    status: 401,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
-
-        if (method === "GET" && !userId) {
-            const q = url.searchParams.get("q") || "";
-            let users = sysConfig.users || [];
-            if (q) {
-                const ql = q.toLowerCase();
-                users = users.filter(
-                    (u) =>
-                        u.name.toLowerCase().includes(ql) ||
-                        u.id.toLowerCase().includes(ql) ||
-                        (u.notes && u.notes.toLowerCase().includes(ql)),
-                );
-            }
-            const enriched = users.map((u) => {
-                const idClean = u.id.replace(/-/g, "").toLowerCase();
-                const sysU = sysUsageCache?.users?.[idClean] || {
-                    reqs: 0,
-                    dReqs: 0,
-                    lastDay: "",
-                };
-                const usedBytes = usageTotalBytes(sysU);
-                const limitBytes = limitReqToBytes(u.limitTotalReq);
-                const isExpired = u.expiryMs && Date.now() > u.expiryMs;
-                let status = "active";
-                if (u.isPaused && u.disabledReason) status = "auto-disabled";
-                else if (u.isPaused) status = "paused";
-                else if (isExpired) status = "expired";
-                return {
-                    ...u,
-                    usage: {
-                        total: usedBytes,
-                        limit: limitBytes,
-                        daily: sysU.dReqs || 0,
-                        dailyLimit: u.limitDailyReq || 0,
-                    },
-                    status,
-                };
-            });
-            return new Response(
-                JSON.stringify({
-                    success: true,
-                    users: enriched,
-                    total: enriched.length,
-                }),
-                { headers: { "Content-Type": "application/json" } },
-            );
-        }
-
-        if (method === "GET" && userId) {
-            const u = (sysConfig.users || []).find(
-                (usr) =>
-                    usr.id === userId ||
-                    usr.name.toLowerCase() === userId.toLowerCase(),
-            );
-            if (!u)
-                return new Response(
-                    JSON.stringify({ success: false, error: "User not found" }),
-                    {
-                        status: 404,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            const idClean = u.id.replace(/-/g, "").toLowerCase();
-            const sysU = sysUsageCache?.users?.[idClean] || {
-                reqs: 0,
-                dReqs: 0,
-                lastDay: "",
-            };
-            const usedBytes = usageTotalBytes(sysU);
-            const limitBytes = limitReqToBytes(u.limitTotalReq);
-            const isExpired = u.expiryMs && Date.now() > u.expiryMs;
-            let status = "active";
-            if (u.isPaused && u.disabledReason) status = "auto-disabled";
-            else if (u.isPaused) status = "paused";
-            else if (isExpired) status = "expired";
-            const hostName = new URL(request.url).hostname;
-            const subUrl = `https://${hostName}/${sysConfig.apiRoute}?sub=${encodeURIComponent(u.name)}`;
-            return new Response(
-                JSON.stringify({
-                    success: true,
-                    user: {
-                        ...u,
-                        usage: {
-                            total: usedBytes,
-                            limit: limitBytes,
-                            daily: sysU.dReqs || 0,
-                            dailyLimit: u.limitDailyReq || 0,
-                        },
-                        status,
-                        subscriptionUrl: subUrl,
-                    },
-                }),
-                { headers: { "Content-Type": "application/json" } },
-            );
-        }
-
-        if (method === "POST" && !userId) {
-            const body = await request.json();
             const {
-                name,
-                trafficLimit,
-                expiryDays,
-                notes,
-                maxConfigs,
-                proxyIp,
-                cleanIp,
-                userMode,
-                userPorts,
-                userNodes,
-                nat64,
-                connLimit,
-                userPanelUrl,
-                segMode,
-                segPackets,
-                segLengths,
-                segDelays,
-                segMaxSplit,
-                segManual,
-                tlsMask,
-            } = body;
-            if (!name)
-                return new Response(
-                    JSON.stringify({
-                        success: false,
-                        error: "Name is required",
-                    }),
-                    {
-                        status: 400,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            const newId = crypto.randomUUID();
-            const newUser = {
-                id: newId,
-                name: name,
-                limitTotalReq: trafficLimit
-                    ? Math.floor(parseFloat(trafficLimit) * 6000)
-                    : null,
-                limitDailyReq: body.dailyLimit
-                    ? Math.floor(parseFloat(body.dailyLimit) * 6000)
-                    : null,
-                expiryMs: expiryDays
-                    ? Date.now() + parseInt(expiryDays) * 86400000
-                    : null,
-                notes: notes || "",
-                maxConfigs: maxConfigs ? parseInt(maxConfigs) : null,
-                proxyIp: proxyIp || null,
-                cleanIp: cleanIp || null,
-                userMode: userMode || null,
-                userPorts: userPorts || null,
-                userNodes: userNodes || null,
-                nat64: nat64 || null,
-                connLimit: connLimit ? parseInt(connLimit) : null,
-                userPanelUrl: userPanelUrl || null,
-                segMode:
-                    segMode === "builder" || segMode === "manual"
-                        ? segMode
-                        : null,
-                segPackets: segPackets ? String(segPackets).slice(0, 32) : null,
-                segLengths: segLengths ? String(segLengths).slice(0, 200) : null,
-                segDelays: segDelays ? String(segDelays).slice(0, 200) : null,
-                segMaxSplit: segMaxSplit ? String(segMaxSplit).slice(0, 12) : null,
-                segManual: segManual ? String(segManual).slice(0, 4000) : null,
-                tlsMask: tlsMask ? String(tlsMask).slice(0, 2000) : null,
-                createdAt: Date.now(),
-            };
-            await resolveUserProxyIpGeo(newUser);
-            if (!sysConfig.users) sysConfig.users = [];
-            sysConfig.users.push(newUser);
-            await cachedD1Put(env, "sys_config", JSON.stringify(sysConfig));
-            ctx?.waitUntil(
-                logActivity(
-                    env,
-                    "User Created",
-                    `User "${name}" (${newId}) created via API`,
-                ).catch(() => {}),
-            );
-            const hostName = new URL(request.url).hostname;
-            const subUrl = `https://${hostName}/${sysConfig.apiRoute}?sub=${encodeURIComponent(name)}`;
-            return new Response(
-                JSON.stringify({
-                    success: true,
-                    user: newUser,
-                    subscriptionUrl: subUrl,
-                }),
-                {
-                    status: 201,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
+              address: 地址714,
+              port: 端口713
+            } = 解析地址值端口(地址部分716);
+            if (!节点名称717) {
+              节点名称717 = '自定义优选-' + 地址714 + (端口713 ? ':' + 端口713 : '');
+            }
+            if (是否有效地址(地址714)) {
+              自定义优选地址列表.push({
+                ip: 地址714,
+                port: 端口713,
+                isp: 节点名称717
+              });
+            } else {
+              自定义优选域名列表.push({
+                domain: 地址714,
+                port: 端口713,
+                name: 节点名称717
+              });
+            }
+          });
+        } catch (错误712) {
+          自定义优选地址列表 = [];
+          自定义优选域名列表 = [];
+        }
+      }
+      const 值控制711 = 获取配置文本值('qj', 配置默认值.qj, 本地值734.qj || 本地值734.QJ);
+      const 值控制711值 = (值控制711 || '').toLowerCase();
+      启用代理降级 = 值控制711值 === 'no';
+      仅走代理 = 值控制711值 === 'only';
+      const 值控制710 = 获取配置文本值('dkby', 配置默认值.dkby, 本地值734.dkby || 本地值734.DKBY);
+      禁用非传输层安全 = !!(值控制710 && 值控制710.toLowerCase() === 'yes');
+      const 值控制709 = 获取配置文本值('yxby', 配置默认值.yxby, 本地值734.yxby || 本地值734.YXBY);
+      禁用优选 = !!(值控制709 && 值控制709.toLowerCase() === 'yes');
+      启用明文 = 获取配置开关值('ev', true, 本地值734.ev);
+      启用木马 = 获取配置开关值('et', false, 本地值734.et);
+      传输路径 = 获取配置文本值('tp', 配置默认值.tp, 本地值734.tp);
+      启用扩展传输 = 获取配置开关值('ex', false, 本地值734.ex);
+      订阅转换接口 = 获取配置文本值('scu', 配置默认值.scu, 本地值734.scu);
+      启用优选域名 = 获取配置开关值('epd', true, 本地值734.epd || 本地值734.EPD);
+      启用优选地址 = 获取配置开关值('epi', true, 本地值734.epi || 本地值734.EPI);
+      启用仓库优选 = 获取配置开关值('egi', true, 本地值734.egi || 本地值734.EGI);
+      启用原生地址 = 获取配置开关值('ena', false, 本地值734.ena || 本地值734.ENA);
+      启用家宽链式 = 获取配置开关值('jk', false, 本地值734.jk || 本地值734.JK);
+      启用加密客户端问候 = 获取配置开关值('ech', false, 本地值734.ech || 本地值734.ECH);
+
+      // 加载自定义DNS和ECH域名配置
+      自定义域名系统 = 获取配置文本值('customDNS', 配置默认值.customDNS).trim() || 配置默认值.customDNS;
+      自定义加密客户端问候域名 = 获取配置文本值('customECHDomain', 配置默认值.customECHDomain).trim() || 配置默认值.customECHDomain;
+      自定义应用层协议协商 = 规范化应用层协议协商(获取配置文本值('alpn', 配置默认值.alpn, 本地值734.alpn || 本地值734.ALPN));
+
+      // 如果启用了ECH，自动启用仅TLS模式（避免80端口干扰）
+      // ECH需要TLS才能工作，所以必须禁用非TLS节点
+      if (启用加密客户端问候) {
+        禁用非传输层安全 = true;
+        // 检查 KV 中是否有 dkby: yes，没有就直接写入
+        const 当前值 = 获取配置值('dkby', '');
+        if (当前值 !== 'yes') {
+          await 设置配置值('dkby', 'yes');
+        }
+      }
+      if (!启用明文 && !启用木马 && !启用扩展传输) {
+        启用明文 = true;
+      }
+      优选地址源 = 获取配置文本值('yxURL', 配置默认值.yxURL, 本地值734.yxURL || 本地值734.YXURL);
+      自定义路径 = 获取配置文本值('d', 配置默认值.d, 本地值734.d || 本地值734.D);
+      const 网址698 = new URL(请求735.url);
+      if (网址698.pathname.includes('/api/config')) {
+        const 路径部分列表697 = 网址698.pathname.split('/').filter(参数值696 => 参数值696);
+        const 接口索引695 = 路径部分列表697.indexOf('api');
+        if (接口索引695 > 0) {
+          const 路径值694 = 路径部分列表697.slice(0, 接口索引695);
+          const 路径值693 = 路径值694.join('/');
+          let 是否有效692 = false;
+          if (自定义路径 && 自定义路径.trim()) {
+            const 清理自定义路径691 = 自定义路径.trim().startsWith('/') ? 自定义路径.trim().substring(1) : 自定义路径.trim();
+            是否有效692 = 路径值693 === 清理自定义路径691;
+          } else {
+            是否有效692 = 是否有效格式(路径值693) && 路径值693 === 认证令牌;
+          }
+          if (是否有效692) {
+            return await 处理配置接口(请求735, 本地值734);
+          } else {
+            return new Response(JSON.stringify({
+              error: '路径验证失败'
+            }), {
+              status: 403,
+              headers: {
+                'Content-Type': 'application/json'
+              }
+            });
+          }
+        }
+        return new Response(JSON.stringify({
+          error: '无效的API路径'
+        }), {
+          status: 404,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+      }
+      if (网址698.pathname.includes('/api/preferred-ips')) {
+        const 路径部分列表690 = 网址698.pathname.split('/').filter(参数值689 => 参数值689);
+        const 接口索引 = 路径部分列表690.indexOf('api');
+        if (接口索引 > 0) {
+          const 路径值688 = 路径部分列表690.slice(0, 接口索引);
+          const 路径值687 = 路径值688.join('/');
+          let 是否有效686 = false;
+          if (自定义路径 && 自定义路径.trim()) {
+            const 清理自定义路径685 = 自定义路径.trim().startsWith('/') ? 自定义路径.trim().substring(1) : 自定义路径.trim();
+            是否有效686 = 路径值687 === 清理自定义路径685;
+          } else {
+            是否有效686 = 是否有效格式(路径值687) && 路径值687 === 认证令牌;
+          }
+          if (是否有效686) {
+            return await 处理优选地址列表接口(请求735);
+          } else {
+            return new Response(JSON.stringify({
+              error: '路径验证失败'
+            }), {
+              status: 403,
+              headers: {
+                'Content-Type': 'application/json'
+              }
+            });
+          }
+        }
+        return new Response(JSON.stringify({
+          error: '无效的API路径'
+        }), {
+          status: 404,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+      }
+      if (请求735.method === 'POST' && 启用扩展传输) {
+        const { 头: 叉填充头, 键: 叉填充键 } = 获取叉HTTP填充标识(认证令牌);
+        if (!校验叉HTTP填充(请求735, 叉填充头, 叉填充键)) {
+          return new Response('Bad Request', {
+            status: 400
+          });
+        }
+        const 结果值684 = await 处理扩展超文本值(请求735);
+        if (结果值684) {
+          本地值733.waitUntil(结果值684.closed);
+          const 响应头684 = {
+            'X-Accel-Buffering': 'no',
+            'Cache-Control': 'no-store',
+            Connection: 'keep-alive',
+            'User-Agent': 'Go-http-client/2.0',
+            'Content-Type': 'application/grpc'
+          };
+          try {
+            const 响应填充 = new URL('https://x.invalid/');
+            响应填充.searchParams.set(叉填充键, 生成叉HTTP填充串(100 + Math.floor(Math.random() * 901)));
+            响应头684[叉填充头] = 响应填充.toString();
+          } catch (忽略684) {}
+          return new Response(结果值684.readable, {
+            headers: 响应头684
+          });
+        }
+        return new Response('Internal Server Error', {
+          status: 500
+        });
+      }
+      if (请求735.headers.get('Upgrade') === atob('d2Vic29ja2V0')) {
+        return await 处理网页套接字请求(请求735);
+      }
+      if (请求735.method === 'GET') {
+        // 处理 /{UUID}/region 或 /{自定义路径}/region
+        if (网址698.pathname.endsWith('/region')) {
+          const 路径部分列表683 = 网址698.pathname.split('/').filter(参数值682 => 参数值682);
+          if (路径部分列表683.length === 2 && 路径部分列表683[1] === 'region') {
+            const 路径值681 = 路径部分列表683[0];
+            let 是否有效680 = false;
+            if (自定义路径 && 自定义路径.trim()) {
+              // 使用自定义路径
+              const 清理自定义路径679 = 自定义路径.trim().startsWith('/') ? 自定义路径.trim().substring(1) : 自定义路径.trim();
+              是否有效680 = 路径值681 === 清理自定义路径679;
+            } else {
+              // 使用UUID路径
+              是否有效680 = 是否有效格式(路径值681) && 路径值681 === 认证令牌;
+            }
+            if (是否有效680) {
+              const 本地值678 = 获取配置值('p', 本地值734.p || 本地值734.P);
+              const 手动地区677 = 获取配置值('wk', 本地值734.wk || 本地值734.WK);
+              if (手动地区677 && 手动地区677.trim()) {
+                return new Response(JSON.stringify({
+                  region: 手动地区677.trim().toUpperCase(),
+                  detectionMethod: '手动指定地区',
+                  manualRegion: 手动地区677.trim().toUpperCase(),
+                  timestamp: new Date().toISOString()
+                }), {
+                  headers: {
+                    'Content-Type': 'application/json'
+                  }
+                });
+              } else if (本地值678 && 本地值678.trim()) {
+                return new Response(JSON.stringify({
+                  region: 'CUSTOM',
+                  detectionMethod: 解码64('6Ieq5a6a5LmJUHJveHlJUOaooeW8jw=='),
+                  ci: 本地值678,
+                  timestamp: new Date().toISOString()
+                }), {
+                  headers: {
+                    'Content-Type': 'application/json'
+                  }
+                });
+              } else {
+                // wk 留空 = 官方直连，用内置地址而不是探测地区
+                return new Response(JSON.stringify({
+                  region: 'CF',
+                  detectionMethod: 解码64('5a6Y5pa555u06L+e'),
+                  timestamp: new Date().toISOString()
+                }), {
+                  headers: {
+                    'Content-Type': 'application/json'
+                  }
+                });
+              }
+            } else {
+              return new Response(JSON.stringify({
+                error: '访问被拒绝',
+                message: '路径验证失败'
+              }), {
+                status: 403,
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+              });
+            }
+          }
         }
 
-        if (method === "PUT" && userId) {
-            const body = await request.json();
-            if (!sysConfig.users)
-                return new Response(
-                    JSON.stringify({ success: false, error: "No users" }),
-                    {
-                        status: 400,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            const u = sysConfig.users.find((usr) => usr.id === userId);
-            if (!u)
-                return new Response(
-                    JSON.stringify({ success: false, error: "User not found" }),
-                    {
-                        status: 404,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            // Graveyard placements are keyed "user:<name>": migrate them on
-            // rename or buried relays of this user would never resurrect.
-            const oldUName = u.name;
-            if (body.name !== undefined) u.name = body.name;
-            if (body.trafficLimit !== undefined)
-                u.limitTotalReq = body.trafficLimit
-                    ? Math.floor(parseFloat(body.trafficLimit) * 6000)
-                    : null;
-            if (body.dailyLimit !== undefined)
-                u.limitDailyReq = body.dailyLimit
-                    ? Math.floor(parseFloat(body.dailyLimit) * 6000)
-                    : null;
-            if (body.expiryDays !== undefined)
-                u.expiryMs = body.expiryDays
-                    ? Date.now() + parseInt(body.expiryDays) * 86400000
-                    : null;
-            if (body.notes !== undefined) u.notes = body.notes;
-            if (body.maxConfigs !== undefined)
-                u.maxConfigs = body.maxConfigs
-                    ? parseInt(body.maxConfigs)
-                    : null;
-            if (body.proxyIp !== undefined) {
-                u.proxyIp = body.proxyIp;
-                if (!body.proxyIp) {
-                    u.proxyIpGeo = null;
-                } else {
-                    await resolveUserProxyIpGeo(u);
-                }
+        // 处理 /{UUID}/test-api 或 /{自定义路径}/test-api
+        if (网址698.pathname.endsWith('/test-api')) {
+          const 路径部分列表676 = 网址698.pathname.split('/').filter(参数值675 => 参数值675);
+          if (路径部分列表676.length === 2 && 路径部分列表676[1] === 'test-api') {
+            const 路径值 = 路径部分列表676[0];
+            let 是否有效 = false;
+            if (自定义路径 && 自定义路径.trim()) {
+              // 使用自定义路径
+              const 清理自定义路径674 = 自定义路径.trim().startsWith('/') ? 自定义路径.trim().substring(1) : 自定义路径.trim();
+              是否有效 = 路径值 === 清理自定义路径674;
+            } else {
+              // 使用UUID路径
+              是否有效 = 是否有效格式(路径值) && 路径值 === 认证令牌;
             }
-            if (body.cleanIp !== undefined) u.cleanIp = body.cleanIp;
-            if (body.userMode !== undefined) u.userMode = body.userMode;
-            if (body.userPorts !== undefined) u.userPorts = body.userPorts;
-            if (body.userNodes !== undefined) u.userNodes = body.userNodes;
-            if (body.nat64 !== undefined) u.nat64 = body.nat64;
-            if (body.connLimit !== undefined)
-                u.connLimit = body.connLimit ? parseInt(body.connLimit) : null;
-            if (body.userPanelUrl !== undefined)
-                u.userPanelUrl = body.userPanelUrl || null;
-            if (body.segMode !== undefined)
-                u.segMode =
-                    body.segMode === "builder" || body.segMode === "manual"
-                        ? body.segMode
-                        : null;
-            if (body.segPackets !== undefined)
-                u.segPackets = body.segPackets
-                    ? String(body.segPackets).slice(0, 32)
-                    : null;
-            if (body.segLengths !== undefined)
-                u.segLengths = body.segLengths
-                    ? String(body.segLengths).slice(0, 200)
-                    : null;
-            if (body.segDelays !== undefined)
-                u.segDelays = body.segDelays
-                    ? String(body.segDelays).slice(0, 200)
-                    : null;
-            if (body.segMaxSplit !== undefined)
-                u.segMaxSplit = body.segMaxSplit
-                    ? String(body.segMaxSplit).slice(0, 12)
-                    : null;
-            if (body.segManual !== undefined)
-                u.segManual = body.segManual
-                    ? String(body.segManual).slice(0, 4000)
-                    : null;
-            if (body.tlsMask !== undefined)
-                u.tlsMask = body.tlsMask
-                    ? String(body.tlsMask).slice(0, 2000)
-                    : null;
-            if (body.status !== undefined) {
-                if (body.status === "active") {
-                    u.isPaused = false;
-                    u.disabledReason = null;
-                    u.disabledAt = null;
-                } else if (body.status === "paused") {
-                    u.isPaused = true;
-                    u.disabledReason = null;
-                    u.disabledAt = null;
+            if (是否有效) {
+              try {
+                return new Response(JSON.stringify({
+                  detectedRegion: 'CF',
+                  message: 'API测试完成',
+                  timestamp: new Date().toISOString()
+                }), {
+                  headers: {
+                    'Content-Type': 'application/json'
+                  }
+                });
+              } catch (错误673) {
+                return new Response(JSON.stringify({
+                  error: 错误673.message,
+                  message: 'API测试失败'
+                }), {
+                  status: 500,
+                  headers: {
+                    'Content-Type': 'application/json'
+                  }
+                });
+              }
+            } else {
+              return new Response(JSON.stringify({
+                error: '访问被拒绝',
+                message: '路径验证失败'
+              }), {
+                status: 403,
+                headers: {
+                  'Content-Type': 'application/json'
                 }
+              });
             }
+          }
+        }
+        if (网址698.pathname === '/') {
+          // 检查是否有自定义首页URL配置
+          const 自定义值 = 获取配置值('homepage', 本地值734.homepage || 本地值734.HOMEPAGE);
+          if (自定义值 && 自定义值.trim()) {
             try {
-                if (
-                    oldUName &&
-                    u.name &&
-                    oldUName !== u.name
-                ) {
-                    const gg = JSON.parse(
-                        (await d1Get(env, "relay_graveyard")) || "{}",
-                    );
-                    let gChanged = false;
-                    for (const gk of Object.keys(gg || {})) {
-                        const ge = gg[gk];
-                        if (
-                            ge &&
-                            Array.isArray(ge.lists) &&
-                            ge.lists.indexOf("user:" + oldUName) !== -1
-                        ) {
-                            ge.lists = [
-                                ...new Set(
-                                    ge.lists.map((l) =>
-                                        l === "user:" + oldUName
-                                            ? "user:" + u.name
-                                            : l,
-                                    ),
-                                ),
-                            ];
-                            gChanged = true;
-                        }
-                    }
-                    if (gChanged)
-                        await d1Put(
-                            env,
-                            "relay_graveyard",
-                            JSON.stringify(gg),
-                        );
-                }
-            } catch (e) {}
-            await cachedD1Put(env, "sys_config", JSON.stringify(sysConfig));
-            ctx?.waitUntil(
-                logActivity(
-                    env,
-                    "User Updated",
-                    `User "${u.name}" (${userId}) updated via API`,
-                ).catch(() => {}),
-            );
-            return new Response(JSON.stringify({ success: true, user: u }), {
-                headers: { "Content-Type": "application/json" },
-            });
-        }
+              // 从自定义URL获取内容
+              const 值响应 = await fetch(自定义值.trim(), {
+                method: 'GET',
+                headers: {
+                  'User-Agent': 请求735.headers.get('User-Agent') || 'Mozilla/5.0',
+                  'Accept': 请求735.headers.get('Accept') || '*/*',
+                  'Accept-Language': 请求735.headers.get('Accept-Language') || 'en-US,en;q=0.9'
+                },
+                redirect: 'follow'
+              });
+              if (值响应.ok) {
+                // 获取响应内容
+                const 内容类型672 = 值响应.headers.get('Content-Type') || 'text/html; charset=utf-8';
+                const 内容671 = await 值响应.text();
 
-        if (method === "DELETE" && userId) {
-            if (!sysConfig.users)
-                return new Response(
-                    JSON.stringify({ success: false, error: "No users" }),
-                    {
-                        status: 400,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            const idx = sysConfig.users.findIndex((usr) => usr.id === userId);
-            if (idx === -1)
-                return new Response(
-                    JSON.stringify({ success: false, error: "User not found" }),
-                    {
-                        status: 404,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            const deleted = sysConfig.users.splice(idx, 1)[0];
-            await cachedD1Put(env, "sys_config", JSON.stringify(sysConfig));
-            ctx?.waitUntil(
-                logActivity(
-                    env,
-                    "User Deleted",
-                    `User "${deleted.name}" (${userId}) deleted via API`,
-                ).catch(() => {}),
-            );
-            return new Response(
-                JSON.stringify({ success: true, deleted: deleted.id }),
-                { headers: { "Content-Type": "application/json" } },
-            );
-        }
-
-        if (method === "POST" && userId && action === "toggle") {
-            if (!sysConfig.users)
-                return new Response(
-                    JSON.stringify({ success: false, error: "No users" }),
-                    {
-                        status: 400,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            const u = sysConfig.users.find((usr) => usr.id === userId);
-            if (!u)
-                return new Response(
-                    JSON.stringify({ success: false, error: "User not found" }),
-                    {
-                        status: 404,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            u.isPaused = !u.isPaused;
-            if (!u.isPaused) {
-                u.disabledReason = null;
-                u.disabledAt = null;
-            }
-            await cachedD1Put(env, "sys_config", JSON.stringify(sysConfig));
-            ctx?.waitUntil(
-                logActivity(
-                    env,
-                    "User Toggled",
-                    `User "${u.name}" (${userId}) ${u.isPaused ? "paused" : "resumed"} via API`,
-                ).catch(() => {}),
-            );
-            return new Response(JSON.stringify({ success: true, user: u }), {
-                headers: { "Content-Type": "application/json" },
-            });
-        }
-
-        if (method === "POST" && userId && action === "reset") {
-            if (!sysUsageCache) sysUsageCache = { users: {} };
-            if (!sysUsageCache.users) sysUsageCache.users = {};
-            const uuidClean = userId.replace(/-/g, "").toLowerCase();
-            if (sysUsageCache.users[uuidClean]) {
-                sysUsageCache.users[uuidClean].reqs = 0;
-                sysUsageCache.users[uuidClean].dReqs = 0;
-            } else {
-                sysUsageCache.users[uuidClean] = {
-                    reqs: 0,
-                    dReqs: 0,
-                    lastDay: new Date().toISOString().split("T")[0],
-                };
-            }
-            await cachedD1Put(env, "sys_usage", JSON.stringify(sysUsageCache));
-            ctx?.waitUntil(
-                logActivity(
-                    env,
-                    "Traffic Reset",
-                    `Traffic reset for user ${userId} via API`,
-                ).catch(() => {}),
-            );
-            return new Response(
-                JSON.stringify({ success: true, message: "Traffic reset" }),
-                { headers: { "Content-Type": "application/json" } },
-            );
-        }
-
-        return new Response(
-            JSON.stringify({ success: false, error: "Invalid request" }),
-            { status: 400, headers: { "Content-Type": "application/json" } },
-        );
-    } catch (e) {
-        return new Response(
-            JSON.stringify({ success: false, error: e.message }),
-            { status: 500, headers: { "Content-Type": "application/json" } },
-        );
-    }
-}
-
-// Relay health snapshot for /api/stats (agency monitoring parity with
-// Sepidar /api/health): quarantine + graveyard + AI quarantine. Read-only,
-// memory + 2 cached D1 reads at most; never throws.
-function relayHealthSnapshot() {
-    const out = { quarantined: [], graveyard: [], aiQuarantine: [] };
-    try {
-        const now = Date.now();
-        for (const [k, e] of RELAY_Q) {
-            if (e && e.until && e.until > now) out.quarantined.push(k);
-        }
-    } catch (e) {}
-    try {
-        for (const [k, e] of AI_RELAY_Q) {
-            if (e && e.until && Date.now() < e.until)
-                out.aiQuarantine.push(k);
-        }
-    } catch (e) {}
-    return out;
-}
-async function relayHealthSnapshotAsync(env) {
-    const out = relayHealthSnapshot();
-    try {
-        if (env && env.IOT_DB) {
-            const g = JSON.parse(
-                (await d1Get(env, "relay_graveyard")) || "{}",
-            );
-            for (const [k, e] of Object.entries(g || {})) {
-                out.graveyard.push({
-                    key: k,
-                    streak: (e && e.healthyStreak) || 0,
-                    unstable: !!(e && e.unstable),
-                    lists: (e && e.lists && e.lists.length) || 0,
+                // 返回自定义首页内容
+                return new Response(内容671, {
+                  status: 值响应.status,
+                  headers: {
+                    'Content-Type': 内容类型672,
+                    'Cache-Control': 'no-cache, no-store, must-revalidate'
+                  }
                 });
+              }
+            } catch (错误670) {
+              // 如果获取失败，继续使用默认终端页面
+              console.error('获取自定义首页失败:', 错误670);
             }
-        }
-    } catch (e) {}
-    return out;
-}
-async function handleStatsApi(request, env) {    try {
-        const url = new URL(request.url);
-        const authHeader = request.headers.get("Authorization") || "";
-        const authKey =
-            authHeader.replace("Bearer ", "") ||
-            url.searchParams.get("key") ||
-            "";
-        const statsGateIp =
-            request.headers.get("cf-connecting-ip") || "Unknown";
-        if (authBlocked(statsGateIp)) {
-            return new Response(
-                JSON.stringify({ success: false, error: "Too many attempts" }),
-                {
-                    status: 429,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
-        if (authKey !== sysConfig.masterKey && !isPanelApiKey(authKey)) {
-            authFail(statsGateIp);
-            return new Response(
-                JSON.stringify({ success: false, error: "Unauthorized" }),
-                {
-                    status: 401,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
+          }
+          // 优先检查Cookie中的语言设置
+          const 凭据头部669 = 请求735.headers.get('Cookie') || '';
+          let 语言来源凭据668 = null;
+          if (凭据头部669) {
+            const 本地值667 = 凭据头部669.split(';').map(丙值666 => 丙值666.trim());
+            for (const 凭据665 of 本地值667) {
+              if (凭据665.startsWith('preferredLanguage=')) {
+                语言来源凭据668 = 凭据665.split('=')[1];
+                break;
+              }
+            }
+          }
+          let 是否值664 = false;
+          if (语言来源凭据668 === 'fa' || 语言来源凭据668 === 'fa-IR') {
+            是否值664 = true;
+          } else if (语言来源凭据668 === 'zh' || 语言来源凭据668 === 'zh-CN') {
+            是否值664 = false;
+          } else {
+            // 如果没有Cookie，使用浏览器语言检测
+            const 接受语言663 = 请求735.headers.get('Accept-Language') || '';
+            const 浏览器语言662 = 接受语言663.split(',')[0].split('-')[0].toLowerCase();
+            是否值664 = 浏览器语言662 === 'fa' || 接受语言663.includes('fa-IR') || 接受语言663.includes('fa');
+          }
+          const 语言 = 是否值664 ? 'fa' : 'zh-CN';
+          const 语言值661 = 是否值664 ? 'fa-IR' : 'zh-CN';
+          const 本地值660 = {
+            zh: {
+              title: '终端 v3.1',
+              terminal: '终端 v3.1',
+              congratulations: '恭喜你来到这',
+              enterU: '请输入你U变量的值',
+              enterD: '请输入你D变量的值',
+              command: '命令: connect [',
+              uuid: 'UUID',
+              path: 'PATH',
+              inputU: '输入U变量的内容并且回车...',
+              inputD: '输入D变量的内容并且回车...',
+              connecting: '正在连接...',
+              invading: '正在入侵...',
+              success: '连接成功！返回结果...',
+              error: '错误: 无效的UUID格式',
+              reenter: '请重新输入有效的UUID'
+            },
+            fa: {
+              title: 'ترمینال v3.1',
+              terminal: 'ترمینال v3.1',
+              congratulations: 'تبریک می‌گوییم به شما',
+              enterU: 'لطفا مقدار متغیر U خود را وارد کنید',
+              enterD: 'لطفا مقدار متغیر D خود را وارد کنید',
+              command: 'دستور: connect [',
+              uuid: 'UUID',
+              path: 'PATH',
+              inputU: 'محتویات متغیر U را وارد کرده و Enter را بزنید...',
+              inputD: 'محتویات متغیر D را وارد کرده و Enter را بزنید...',
+              connecting: 'در حال اتصال...',
+              invading: 'در حال نفوذ...',
+              success: 'اتصال موفق! در حال بازگشت نتیجه...',
+              error: 'خطا: فرمت UUID نامعتبر',
+              reenter: 'لطفا UUID معتبر را دوباره وارد کنید'
+            }
+          };
+          const 翻译值659 = 本地值660[是否值664 ? 'fa' : 'zh'];
+          const 终端页面 = `<!DOCTYPE html>
+    <html lang="${语言值661}" dir="${是否值664 ? 'rtl' : 'ltr'}">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${翻译值659.title}</title>
+        <style>
+            :root {
+                --cp-bg: #05030e;
+                --cp-bg-2: #0a0820;
+                --cp-cyan: #00f0ff;
+                --cp-cyan-d: #00b8c4;
+                --cp-pink: #ff2bd6;
+                --cp-pink-d: #d1239f;
+                --cp-purple: #a347ff;
+                --cp-yellow: #fff200;
+                --cp-mint: #00ff9d;
+                --cp-red: #ff3860;
+                --cp-text: #e6f5ff;
+                --cp-text-dim: #7aa9c4;
+                --cp-border: rgba(0, 240, 255, 0.55);
+                --cp-grid: rgba(255, 43, 214, 0.16);
+            }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html, body { height: 100%; }
+            body {
+                font-family: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+                background: radial-gradient(ellipse at 20% 10%, #2a0040 0%, var(--cp-bg) 55%, #000 100%);
+                color: var(--cp-text);
+                min-height: 100vh;
+                overflow-x: hidden;
+                position: relative;
+                display: flex; justify-content: center; align-items: center;
+            }
+            body::before {
+                content: ""; position: fixed; inset: 0;
+                background-image:
+                    linear-gradient(var(--cp-grid) 1px, transparent 1px),
+                    linear-gradient(90deg, var(--cp-grid) 1px, transparent 1px);
+                background-size: 48px 48px;
+                mask-image: radial-gradient(ellipse at center, #000 30%, transparent 80%);
+                z-index: -3;
+                animation: cp-grid-slide 18s linear infinite;
+            }
+            body::after {
+                content: ""; position: fixed; inset: 0;
+                background: repeating-linear-gradient(
+                    180deg,
+                    rgba(255,255,255,0.04) 0,
+                    rgba(255,255,255,0.04) 1px,
+                    transparent 1px,
+                    transparent 3px
+                );
+                pointer-events: none;
+                z-index: 5;
+                mix-blend-mode: overlay;
+                animation: cp-scan-flicker 6s infinite;
+            }
+            @keyframes cp-grid-slide {
+                0% { background-position: 0 0, 0 0; }
+                100% { background-position: 48px 48px, 48px 48px; }
+            }
+            @keyframes cp-scan-flicker {
+                0%, 100% { opacity: 0.6; }
+                50% { opacity: 0.9; }
+            }
+            .matrix-bg {
+                position: fixed; inset: 0;
+                background:
+                    radial-gradient(circle at 80% 90%, rgba(255,43,214,0.18) 0%, transparent 45%),
+                    radial-gradient(circle at 10% 80%, rgba(0,240,255,0.18) 0%, transparent 45%);
+                z-index: -2;
+                pointer-events: none;
+            }
+            .matrix-rain { display: none; }
+            .matrix-code-rain {
+                position: fixed; inset: 0;
+                pointer-events: none; z-index: -1;
+                overflow: hidden;
+            }
+            .matrix-column {
+                position: absolute; top: -120%; left: 0;
+                color: var(--cp-cyan);
+                font-family: "JetBrains Mono", "Courier New", monospace;
+                font-size: 14px; line-height: 1.25;
+                text-shadow: 0 0 6px var(--cp-cyan), 0 0 12px rgba(0,240,255,0.5);
+                animation: cp-drop linear infinite;
+            }
+            @keyframes cp-drop {
+                0%   { top: -120%; opacity: 0; }
+                10%  { opacity: 0.85; }
+                90%  { opacity: 0.4; }
+                100% { top: 110vh; opacity: 0; }
+            }
+            .matrix-column:nth-child(odd)  { animation-duration: 12s; }
+            .matrix-column:nth-child(even) { animation-duration: 18s; color: var(--cp-pink); text-shadow: 0 0 6px var(--cp-pink), 0 0 14px rgba(255,43,214,0.5); }
+            .matrix-column:nth-child(3n)   { animation-duration: 20s; color: var(--cp-purple); text-shadow: 0 0 6px var(--cp-purple); }
+            .matrix-column:nth-child(5n)   { animation-duration: 9s; opacity: 0.6; }
 
-        const users = sysConfig.users || [];
-        const totalUsers = users.length;
-        const activeUsers = users.filter(
-            (u) => !u.isPaused && (!u.expiryMs || Date.now() <= u.expiryMs),
-        ).length;
-        const autoDisabledUsers = users.filter(
-            (u) => u.isPaused && u.disabledReason,
-        ).length;
-        const pausedUsers = users.filter(
-            (u) => u.isPaused && !u.disabledReason,
-        ).length;
-        const expiredUsers = users.filter(
-            (u) => u.expiryMs && Date.now() > u.expiryMs && !u.isPaused,
-        ).length;
+            .terminal {
+                width: 92%; max-width: 860px; height: 540px;
+                background:
+                    linear-gradient(180deg, rgba(8,4,28,0.92) 0%, rgba(15,3,40,0.92) 100%);
+                border: 1px solid var(--cp-border);
+                border-radius: 0;
+                box-shadow:
+                    0 0 0 1px rgba(255,43,214,0.25),
+                    0 0 28px rgba(0,240,255,0.35),
+                    0 0 80px rgba(255,43,214,0.18),
+                    inset 0 0 30px rgba(0,240,255,0.06);
+                clip-path: polygon(
+                    0 18px, 18px 0,
+                    calc(100% - 60px) 0, calc(100% - 42px) 18px,
+                    100% 18px, 100% calc(100% - 14px),
+                    calc(100% - 14px) 100%, 42px 100%,
+                    24px calc(100% - 14px), 0 calc(100% - 14px)
+                );
+                position: relative; z-index: 1;
+                overflow: hidden;
+            }
+            .terminal::before {
+                content: ""; position: absolute; inset: 0;
+                background: repeating-linear-gradient(180deg, rgba(0,240,255,0.06) 0 1px, transparent 1px 4px);
+                pointer-events: none;
+                animation: cp-scan-flicker 5s infinite;
+            }
+            .terminal-header {
+                background: linear-gradient(90deg, rgba(255,43,214,0.18), rgba(0,240,255,0.18));
+                padding: 12px 18px;
+                border-bottom: 1px solid rgba(0,240,255,0.5);
+                display: flex; align-items: center; gap: 16px;
+                position: relative;
+            }
+            .terminal-header::after {
+                content: ""; position: absolute; left: 18px; right: 18px; bottom: -1px;
+                height: 1px;
+                background: linear-gradient(90deg, transparent, var(--cp-pink), var(--cp-cyan), transparent);
+                animation: cp-scan-line 4s linear infinite;
+            }
+            @keyframes cp-scan-line {
+                0% { transform: translateX(-30%); opacity: 0.4; }
+                50% { opacity: 1; }
+                100% { transform: translateX(30%); opacity: 0.4; }
+            }
+            .terminal-buttons {
+                display: flex; gap: 8px;
+            }
+            .terminal-button {
+                width: 12px; height: 12px;
+                background: var(--cp-pink);
+                box-shadow: 0 0 8px var(--cp-pink);
+                border: none; transform: rotate(45deg);
+            }
+            .terminal-button:nth-child(2) { background: var(--cp-yellow); box-shadow: 0 0 8px var(--cp-yellow); }
+            .terminal-button:nth-child(3) { background: var(--cp-mint); box-shadow: 0 0 8px var(--cp-mint); }
+            .terminal-title {
+                color: var(--cp-cyan);
+                font-size: 13px; font-weight: 700;
+                letter-spacing: 0.25em;
+                text-transform: uppercase;
+                text-shadow: 0 0 6px var(--cp-cyan);
+            }
+            .terminal-title::before { content: "// "; color: var(--cp-pink); }
+            .terminal-body {
+                padding: 24px; height: calc(100% - 52px);
+                overflow-y: auto; font-size: 14px;
+                line-height: 1.6;
+                position: relative;
+            }
+            .terminal-body::-webkit-scrollbar { width: 6px; }
+            .terminal-body::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, var(--cp-pink), var(--cp-cyan));
+            }
+            .terminal-line {
+                margin-bottom: 8px; display: flex; align-items: center; gap: 8px;
+                flex-wrap: wrap;
+            }
+            .terminal-prompt {
+                color: var(--cp-pink);
+                font-weight: 700;
+                text-shadow: 0 0 6px var(--cp-pink);
+                letter-spacing: 0.05em;
+            }
+            .terminal-prompt::before { content: "▍"; color: var(--cp-cyan); margin-right: 4px; }
+            .terminal-input {
+                background: transparent; border: none; outline: none;
+                color: var(--cp-cyan);
+                font-family: inherit;
+                font-size: 14px; flex: 1; min-width: 0;
+                caret-color: var(--cp-pink);
+                text-shadow: 0 0 4px var(--cp-cyan);
+            }
+            .terminal-input::placeholder { color: var(--cp-text-dim); opacity: 0.75; }
+            .terminal-cursor {
+                display: inline-block; width: 9px; height: 16px;
+                background: var(--cp-pink);
+                margin-left: 2px;
+                box-shadow: 0 0 8px var(--cp-pink);
+                animation: cp-blink 1s steps(2, end) infinite;
+            }
+            @keyframes cp-blink {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0; }
+            }
+            .terminal-output { color: var(--cp-cyan); margin: 4px 0; }
+            .terminal-error  { color: var(--cp-red); margin: 4px 0; text-shadow: 0 0 6px var(--cp-red); }
+            .terminal-success{ color: var(--cp-mint); margin: 4px 0; text-shadow: 0 0 6px var(--cp-mint); }
 
-        let totalTrafficReqs = 0;
-        let dailyTrafficReqs = 0;
-        let totalTrafficBytes = 0;
-        let dailyTrafficBytes = 0;
-        const todayDate = new Date().toISOString().split("T")[0];
-        users.forEach((u) => {
-            const idClean = u.id.replace(/-/g, "").toLowerCase();
-            const sysU = sysUsageCache?.users?.[idClean] || {
-                reqs: 0,
-                dReqs: 0,
-                lastDay: "",
-            };
-            totalTrafficReqs += sysU.reqs || 0;
-            if (sysU.lastDay === todayDate) dailyTrafficReqs += sysU.dReqs || 0;
-            totalTrafficBytes += usageTotalBytes(sysU);
-            dailyTrafficBytes += usageDailyBytes(sysU, todayDate);
-        });
+            .cp-hud {
+                position: fixed; top: 18px; right: 22px;
+                color: var(--cp-cyan);
+                font-family: "JetBrains Mono", monospace;
+                font-size: 11px; letter-spacing: 0.2em;
+                text-transform: uppercase;
+                text-align: right;
+                opacity: 0.85;
+                z-index: 1000;
+            }
+            .cp-hud .cp-hud-label { color: var(--cp-pink); }
+            .cp-hud .cp-hud-line { display: block; }
+            .cp-lang-wrapper {
+                position: fixed; top: 18px; left: 22px; z-index: 1000;
+                display: flex; align-items: center; gap: 10px;
+            }
+            .cp-lang-tag {
+                color: var(--cp-pink); font-size: 11px;
+                letter-spacing: 0.25em; text-transform: uppercase;
+                text-shadow: 0 0 6px var(--cp-pink);
+            }
+            #languageSelector {
+                background: rgba(8,4,28,0.85);
+                border: 1px solid var(--cp-cyan);
+                color: var(--cp-cyan);
+                padding: 6px 12px;
+                font-family: inherit;
+                font-size: 12px;
+                cursor: pointer;
+                letter-spacing: 0.12em;
+                text-shadow: 0 0 6px var(--cp-cyan);
+                box-shadow: 0 0 12px rgba(0,240,255,0.35);
+                clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+            }
+            #languageSelector option { background: var(--cp-bg-2); color: var(--cp-cyan); }
 
-        
-        let usageData = {};
-        for (let [k, v] of uuidUsage.entries()) {
-            usageData[k] = { ...v, connects: activeConns.get(k) || 0 };
-        }
-        const upSeconds = Math.floor((Date.now() - isolateStartTime) / 1000);
+            /* FX toggle - 页面特效图形化开关 */
+            .cp-fx-toggle {
+                position: fixed; top: 68px; left: 22px; z-index: 1001;
+                background: rgba(8,4,28,0.85);
+                border: 1px solid var(--cp-mint);
+                color: var(--cp-mint);
+                padding: 6px 12px;
+                font-family: inherit;
+                font-size: 11px;
+                letter-spacing: 0.18em;
+                text-transform: uppercase;
+                cursor: pointer;
+                text-shadow: 0 0 6px var(--cp-mint);
+                box-shadow: 0 0 10px rgba(0,255,157,0.35);
+                clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+                transition: all 0.2s ease;
+                display: inline-flex; align-items: center; gap: 6px;
+            }
+            .cp-fx-toggle:hover { color: var(--cp-pink); border-color: var(--cp-pink); text-shadow: 0 0 8px var(--cp-pink); box-shadow: 0 0 16px rgba(255,43,214,0.55); }
+            .cp-fx-toggle .cp-fx-dot { width: 6px; height: 6px; background: var(--cp-mint); border-radius: 50%; box-shadow: 0 0 8px var(--cp-mint); transition: all 0.2s; }
+            body.fx-off .cp-fx-toggle { color: var(--cp-text-dim); border-color: var(--cp-text-dim); text-shadow: none; box-shadow: none; }
+            body.fx-off .cp-fx-toggle .cp-fx-dot { background: transparent; border: 1px solid var(--cp-text-dim); box-shadow: none; }
+            body.fx-off .matrix-bg,
+            body.fx-off .matrix-code-rain,
+            body.fx-off .matrix-column { display: none !important; }
+            body.fx-off::before,
+            body.fx-off::after { display: none !important; content: none !important; }
+            body.fx-off { background: var(--cp-bg) !important; }
+            body.fx-off * {
+                animation: none !important;
+                transition: color 0.15s, background-color 0.15s, border-color 0.15s, box-shadow 0.15s !important;
+            }
+            body.fx-off .cp-glitch::before,
+            body.fx-off .cp-glitch::after { display: none !important; }
+            body.fx-off .terminal-cursor::after { animation: none !important; }
 
-        return new Response(
-            JSON.stringify({
-                success: true,
-                stats: {
-                    users: {
-                        total: totalUsers,
-                        active: activeUsers,
-                        paused: pausedUsers,
-                        expired: expiredUsers,
-                        autoDisabled: autoDisabledUsers,
-                    },
-                    traffic: {
-                        totalRequests: totalTrafficReqs,
-                        totalGB: (totalTrafficBytes / 1073741824).toFixed(2),
-                        dailyRequests: dailyTrafficReqs,
-                        dailyGB: (dailyTrafficBytes / 1073741824).toFixed(2),
-                    },
-                    usage: usageData,
-                    system: {
-                        uptimeSeconds: upSeconds,
-                        activeConnections,
-                        version: CURRENT_VERSION,
-                        isPaused: sysConfig.isPaused || false,
-                        security: {
-                            usingDefaultKey:
-                                sysConfig.masterKey === "admin",
-                        },
-                    },
-                    relays: await relayHealthSnapshotAsync(env),
-                },
-            }),
-            { headers: { "Content-Type": "application/json" } },
-        );
-    } catch (e) {
-        return new Response(
-            JSON.stringify({ success: false, error: e.message }),
-            { status: 500, headers: { "Content-Type": "application/json" } },
-        );
+            .cp-glitch {
+                font-family: "JetBrains Mono", monospace;
+                font-weight: 700;
+                letter-spacing: 0.18em;
+                text-transform: uppercase;
+                color: var(--cp-cyan);
+                text-shadow:
+                    0 0 8px var(--cp-cyan),
+                    -2px 0 var(--cp-pink),
+                    2px 0 var(--cp-mint);
+            }
+        </style>
+    </head>
+    <body>
+        <div class="matrix-bg"></div>
+        <div class="matrix-code-rain" id="matrixCodeRain"></div>
+            <div class="cp-hud">
+                <span class="cp-hud-line"><span class="cp-hud-label">SYS::</span> ${翻译值659.terminal}</span>
+                <span class="cp-hud-line"><span class="cp-hud-label">NODE::</span> NIGHT_CITY</span>
+                <span class="cp-hud-line"><span class="cp-hud-label">LINK::</span> SECURE / ENC</span>
+            </div>
+            <div class="cp-lang-wrapper">
+                <span class="cp-lang-tag">LANG_</span>
+                <select id="languageSelector" onchange="切换语言(this.value)">
+                    <option value="zh" ${!是否值664 ? 'selected' : ''}>🇨🇳 中文</option>
+                    <option value="fa" ${是否值664 ? 'selected' : ''}>🇮🇷 فارسی</option>
+                </select>
+            </div>
+            <button type="button" id="cpFxToggle" class="cp-fx-toggle" onclick="window.切换页面特效()" title="${是否值664 ? 'تغییر افکت‌های صفحه' : '切换页面特效'}" aria-label="FX toggle">
+                <span class="cp-fx-dot" aria-hidden="true"></span>
+                <span id="cpFxLabel">FX: ON</span>
+            </button>
+        <div class="terminal">
+            <div class="terminal-header">
+                <div class="terminal-buttons">
+                    <div class="terminal-button"></div>
+                    <div class="terminal-button"></div>
+                    <div class="terminal-button"></div>
+                </div>
+                    <div class="terminal-title cp-glitch">${翻译值659.terminal}</div>
+            </div>
+            <div class="terminal-body" id="terminalBody">
+                <div class="terminal-line">
+                    <span class="terminal-prompt">root:~$</span>
+                        <span class="terminal-output">${翻译值659.congratulations}</span>
+                </div>
+                <div class="terminal-line">
+                    <span class="terminal-prompt">root:~$</span>
+                        <span class="terminal-output">${自定义路径 && 自定义路径.trim() ? 翻译值659.enterD : 翻译值659.enterU}</span>
+                </div>
+                <div class="terminal-line">
+                    <span class="terminal-prompt">root:~$</span>
+                        <span class="terminal-output">${翻译值659.command}${自定义路径 && 自定义路径.trim() ? 翻译值659.path : 翻译值659.uuid}]</span>
+                </div>
+                <div class="terminal-line">
+                    <span class="terminal-prompt">root:~$</span>
+                        <input type="text" class="terminal-input" id="uuidInput" placeholder="${自定义路径 && 自定义路径.trim() ? 翻译值659.inputD : 翻译值659.inputU}" autofocus>
+                    <span class="terminal-cursor"></span>
+                </div>
+            </div>
+        </div>
+        <script>
+// 页面特效图形化开关 (localStorage 持久化)
+window.应用页面特效 = function () {
+  var 本地值10009 = localStorage.getItem('cp-fx-off') === '1';
+  document.body.classList.toggle('fx-off', 本地值10009);
+  var 本地值10008 = document.getElementById('cpFxLabel');
+  if (本地值10008) 本地值10008.textContent = 本地值10009 ? 'FX: OFF' : 'FX: ON';
+  if (本地值10009) {
+    var 本地值10007 = document.getElementById('matrixCodeRain');
+    if (本地值10007) 本地值10007.innerHTML = '';
+  } else if (typeof 创建矩阵雨 === 'function') {
+    var 结果值 = document.getElementById('matrixCodeRain');
+    if (结果值 && !结果值.firstChild) 创建矩阵雨();
+  }
+};
+window.切换页面特效 = function () {
+  var 本地值10006 = localStorage.getItem('cp-fx-off') === '1';
+  localStorage.setItem('cp-fx-off', 本地值10006 ? '0' : '1');
+  window.应用页面特效();
+};
+(function () {
+  if (localStorage.getItem('cp-fx-off') === '1') {
+    document.documentElement.classList.add('fx-off-preload');
+    document.addEventListener('DOMContentLoaded', function () {
+      document.body.classList.add('fx-off');
+    });
+  }
+})();
+function 创建矩阵雨() {
+  if (document.body && document.body.classList.contains('fx-off')) return;
+  const 矩阵值 = document.getElementById('matrixCodeRain');
+  if (!矩阵值) return;
+  const 赛博字符列表 = '01アイウエオカキクケコサシスセソタチツテトナニヌネノ$%#@!?<>+=ABCDEF';
+  const 调色板 = ['#00f0ff', '#ff2bd6', '#a347ff', '#00ff9d'];
+  const 列数 = Math.floor(window.innerWidth / 20);
+  for (let 索引值 = 0; 索引值 < 列数; 索引值++) {
+    const 列10005 = document.createElement('div');
+    列10005.className = 'matrix-column';
+    列10005.style.left = 索引值 * 20 + 'px';
+    列10005.style.animationDelay = -Math.random() * 15 + 's';
+    列10005.style.animationDuration = Math.random() * 14 + 8 + 's';
+    列10005.style.fontSize = Math.random() * 4 + 12 + 'px';
+    列10005.style.opacity = (Math.random() * 0.7 + 0.3).toFixed(2);
+    let 文本 = '';
+    const 字符数量 = Math.floor(Math.random() * 30 + 18);
+    for (let 次索引值 = 0; 次索引值 < 字符数量; 次索引值++) {
+      const 字符 = 赛博字符列表[Math.floor(Math.random() * 赛博字符列表.length)];
+      const 值强调 = Math.random() > 0.85;
+      const 颜色 = 值强调 ? 调色板[Math.floor(Math.random() * 调色板.length)] : '';
+      文本 += 颜色 ? '<span style="color:' + 颜色 + ';text-shadow:0 0 8px ' + 颜色 + ';">' + 字符 + '</span><br>' : '<span>' + 字符 + '</span><br>';
     }
+    列10005.innerHTML = 文本;
+    矩阵值.appendChild(列10005);
+  }
+  setInterval(function () {
+    const 列列表 = 矩阵值.querySelectorAll('.matrix-column');
+    列列表.forEach(function (列) {
+      if (Math.random() > 0.94) {
+        const 字符列表 = 列.querySelectorAll('span');
+        if (字符列表.length > 0) {
+          const 目标 = 字符列表[Math.floor(Math.random() * 字符列表.length)];
+          const 本地值10004 = 目标.style.color;
+          目标.style.color = '#ffffff';
+          目标.style.textShadow = '0 0 10px #ffffff, 0 0 18px #00f0ff';
+          setTimeout(function () {
+            目标.style.color = 本地值10004;
+            目标.style.textShadow = '';
+          }, 200);
+        }
+      }
+    });
+  }, 110);
 }
-
-
-
-function cmpVersions(a, b) {
-    const strip = (v) => String(v).replace(/^v/, "").trim();
-    const pa = strip(a).split(".").map(Number);
-    const pb = strip(b).split(".").map(Number);
-    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        let na = pa[i] || 0,
-            nb = pb[i] || 0;
-        if (na > nb) return 1;
-        if (nb > na) return -1;
+function 是否有效唯一标识(唯一标识) {
+  const 唯一标识正则 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return 唯一标识正则.test(唯一标识);
+}
+function 添加终端行(内容, 类型 = 'output') {
+  const 终端主体 = document.getElementById('terminalBody');
+  const 行 = document.createElement('div');
+  行.className = 'terminal-line';
+  const 提示符 = document.createElement('span');
+  提示符.className = 'terminal-prompt';
+  提示符.textContent = 'root:~$';
+  const 输出 = document.createElement('span');
+  输出.className = 'terminal-' + 类型;
+  输出.textContent = 内容;
+  行.appendChild(提示符);
+  行.appendChild(输出);
+  终端主体.appendChild(行);
+  终端主体.scrollTop = 终端主体.scrollHeight;
+}
+function 处理唯一标识输入() {
+  const 输入10003 = document.getElementById('uuidInput');
+  const 输入值 = 输入10003.value.trim();
+  const 自定义路径 = '${自定义路径}';
+  if (输入值) {
+    添加终端行(atob('Y29ubmVjdCA=') + 输入值, 'output');
+    const 本地值 = {
+      zh: {
+        connecting: '正在连接...',
+        invading: '正在入侵...',
+        success: '连接成功！返回结果...',
+        error: '错误: 无效的UUID格式',
+        reenter: '请重新输入有效的UUID'
+      },
+      fa: {
+        connecting: 'در حال اتصال...',
+        invading: 'در حال نفوذ...',
+        success: 'اتصال موفق! در حال بازگشت نتیجه...',
+        error: 'خطا: فرمت UUID نامعتبر',
+        reenter: 'لطفا UUID معتبر را دوباره وارد کنید'
+      }
+    };
+    const 浏览器语言 = navigator.language || navigator.userLanguage || '';
+    const 是否值 = 浏览器语言.includes('fa') || 浏览器语言.includes('fa-IR');
+    const 翻译值 = 本地值[是否值 ? 'fa' : 'zh'];
+    if (自定义路径) {
+      const 清理输入 = 输入值.startsWith('/') ? 输入值 : '/' + 输入值;
+      添加终端行(翻译值.connecting, 'output');
+      setTimeout(() => {
+        添加终端行(翻译值.success, 'success');
+        setTimeout(() => {
+          window.location.href = 清理输入;
+        }, 1000);
+      }, 500);
+    } else {
+      if (是否有效唯一标识(输入值)) {
+        添加终端行(翻译值.invading, 'output');
+        setTimeout(() => {
+          添加终端行(翻译值.success, 'success');
+          setTimeout(() => {
+            window.location.href = '/' + 输入值;
+          }, 1000);
+        }, 500);
+      } else {
+        添加终端行(翻译值.error, 'error');
+        添加终端行(翻译值.reenter, 'output');
+      }
     }
-    return 0;
+    输入10003.value = '';
+  }
+}
+function 切换语言(语言) {
+  localStorage.setItem('preferredLanguage', 语言);
+  // 设置Cookie（有效期1年）
+  const 过期日期10002 = new Date();
+  过期日期10002.setFullYear(过期日期10002.getFullYear() + 1);
+  document.cookie = 'preferredLanguage=' + 语言 + '; path=/; expires=' + 过期日期10002.toUTCString() + '; SameSite=Lax';
+  // 刷新页面，不使用URL参数
+  window.location.reload();
 }
 
-async function handleUpdateApi(request, env, ctx) {
-    try {
-        if (request.method !== "POST")
-            return new Response("405", { status: 405 });
-        const data = await request.json();
-        const deployKey = extractAuthKey(request, data);
-        const deployGateIp =
-            request.headers.get("cf-connecting-ip") || "Unknown";
-        if (authBlocked(deployGateIp)) {
-            return new Response(
-                JSON.stringify({ success: false, error: "Too many attempts" }),
-                {
-                    status: 429,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
-        if (deployKey !== sysConfig.masterKey) {
-            authFail(deployGateIp);
-            return new Response(
-                JSON.stringify({ success: false, error: "Unauthorized" }),
-                {
-                    status: 401,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
+// 页面加载时检查 localStorage 和 Cookie，并清理URL参数
+window.addEventListener('DOMContentLoaded', function () {
+  function 获取凭据(名称) {
+    const 值 = '; ' + document.cookie;
+    const 部分列表 = 值.split('; ' + 名称 + '=');
+    if (部分列表.length === 2) return 部分列表.pop().split(';').shift();
+    return null;
+  }
+  const 已保存语言 = localStorage.getItem('preferredLanguage') || 获取凭据('preferredLanguage');
+  const 网址参数 = new URLSearchParams(window.location.search);
+  const 网址语言 = 网址参数.get('lang');
 
-        const accountId = sysConfig.cfAccountId;
-        const apiToken = sysConfig.cfApiToken;
-        const workerName = sysConfig.cfWorkerName;
-        const repo = (sysConfig.githubRepo || "itsyebekhe/nahan")
-            .replace(/https?:\/\/github\.com\//, "")
-            .trim();
+  // 如果URL中有语言参数，移除它并设置Cookie
+  if (网址语言) {
+    const 当前网址 = new URL(window.location.href);
+    当前网址.searchParams.delete('lang');
+    const 新网址 = 当前网址.toString();
 
-        if (data.action === "check") {
-            let remoteVer = null;
-            try {
-                const res = await fetchT(
-                    `https://raw.githubusercontent.com/${repo}/main/version`,
-                );
-                if (res.ok) {
-                    const txt = (await res.text()).trim();
-                    if (txt && txt.length <= 15) remoteVer = txt;
+    // 设置Cookie
+    const 过期日期10001 = new Date();
+    过期日期10001.setFullYear(过期日期10001.getFullYear() + 1);
+    document.cookie = 'preferredLanguage=' + 网址语言 + '; path=/; expires=' + 过期日期10001.toUTCString() + '; SameSite=Lax';
+    localStorage.setItem('preferredLanguage', 网址语言);
+
+    // 使用history API移除URL参数，不刷新页面
+    window.history.replaceState({}, '', 新网址);
+  } else if (已保存语言) {
+    // 如果localStorage中有但Cookie中没有，同步到Cookie
+    const 过期日期 = new Date();
+    过期日期.setFullYear(过期日期.getFullYear() + 1);
+    document.cookie = 'preferredLanguage=' + 已保存语言 + '; path=/; expires=' + 过期日期.toUTCString() + '; SameSite=Lax';
+  }
+});
+document.addEventListener('DOMContentLoaded', function () {
+  try {
+    创建矩阵雨();
+  } catch (事件值10000) {}
+  const 输入 = document.getElementById('uuidInput');
+  if (输入) {
+    输入.focus();
+    输入.addEventListener('keypress', function (事件值) {
+      if (事件值.key === 'Enter') {
+        处理唯一标识输入();
+      }
+    });
+  }
+});
+</script>
+    </body>
+    </html>`;
+          return new Response(终端页面, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8'
+            }
+          });
+        }
+        if (自定义路径 && 自定义路径.trim()) {
+          const 清理自定义路径 = 自定义路径.trim().startsWith('/') ? 自定义路径.trim() : '/' + 自定义路径.trim();
+          const 规范化自定义路径 = 清理自定义路径.endsWith('/') && 清理自定义路径.length > 1 ? 清理自定义路径.slice(0, -1) : 清理自定义路径;
+          const 规范化路径 = 网址698.pathname.endsWith('/') && 网址698.pathname.length > 1 ? 网址698.pathname.slice(0, -1) : 网址698.pathname;
+          if (规范化路径 === 规范化自定义路径) {
+            return await 处理订阅值(请求735, 认证令牌);
+          }
+          if (规范化路径 === 规范化自定义路径 + '/sub') {
+            return await 处理订阅请求(请求735, 认证令牌, 网址698);
+          }
+          if (网址698.pathname.length > 1 && 网址698.pathname !== '/') {
+            const 用户658 = 网址698.pathname.replace(/\/$/, '').replace('/sub', '').substring(1);
+            if (是否有效格式(用户658)) {
+              return new Response(JSON.stringify({
+                error: '访问被拒绝',
+                message: '当前 Worker 已启用自定义路径模式，UUID 访问已禁用'
+              }), {
+                status: 403,
+                headers: {
+                  'Content-Type': 'application/json'
                 }
-            } catch (e) {}
-            if (!remoteVer) {
-                try {
-                    let res = await fetchT(
-                        `https://raw.githubusercontent.com/${repo}/main/_worker.encode.js`,
-                    );
-                    if (!res.ok) {
-                        res = await fetchT(
-                            `https://raw.githubusercontent.com/${repo}/main/_worker.encoded.js`,
-                        );
-                        if (!res.ok) {
-                            res = await fetchT(
-                                `https://raw.githubusercontent.com/${repo}/main/_worker.js`,
-                            );
-                        }
-                    }
-                    if (res.ok) {
-                        const code = await res.text();
-                        const match = code.match(
-                            /const\s+CURRENT_VERSION\s*=\s*["']([^"']+)["']/,
-                        );
-                        if (match) remoteVer = match[1];
-                    }
-                } catch (e) {}
+              });
             }
-            if (!remoteVer) {
-                return new Response(
-                    JSON.stringify({
-                        success: false,
-                        error: "Could not fetch remote version",
-                    }),
-                    {
-                        status: 502,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
+          }
+        } else {
+          if (网址698.pathname.length > 1 && 网址698.pathname !== '/' && !网址698.pathname.includes('/sub')) {
+            const 用户657 = 网址698.pathname.replace(/\/$/, '').substring(1);
+            if (是否有效格式(用户657)) {
+              if (用户657 === 认证令牌) {
+                return await 处理订阅值(请求735, 用户657);
+              } else {
+                return new Response(JSON.stringify({
+                  error: 'UUID错误 请注意变量名称是u不是uuid'
+                }), {
+                  status: 403,
+                  headers: {
+                    'Content-Type': 'application/json'
+                  }
+                });
+              }
             }
-            const hasCredentials = !!(accountId && apiToken && workerName);
-            return new Response(
-                JSON.stringify({
-                    success: true,
-                    current: CURRENT_VERSION,
-                    latest: remoteVer,
-                    updateAvailable:
-                        cmpVersions(CURRENT_VERSION, remoteVer) < 0,
-                    canDeploy: hasCredentials,
-                }),
-                { headers: { "Content-Type": "application/json" } },
-            );
-        }
-
-        if (data.action === "deploy") {
-            // Remote-code-execution gate: deploying worker code with only
-            // the panel key is disabled unless the operator explicitly opts
-            // in (POST {"key":...,"config":{"allowRemoteDeploy":true}} to
-            // /api/sync). Version *check* above stays available.
-            if (sysConfig.allowRemoteDeploy !== true) {
-                return new Response(
-                    JSON.stringify({
-                        success: false,
-                        error: "Remote deploy is disabled. Enable allowRemoteDeploy in config to use it.",
-                    }),
-                    {
-                        status: 403,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            }
-            if (!accountId || !apiToken || !workerName) {
-                return new Response(
-                    JSON.stringify({
-                        success: false,
-                        error: "CF credentials not configured",
-                    }),
-                    {
-                        status: 400,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            }
-
-            let newVersion = data.version || null;
-
-            let finalCodeToDeploy = data.code;
-            if (!finalCodeToDeploy) {
-                try {
-                    let res = await fetchT(
-                        `https://raw.githubusercontent.com/${repo}/main/_worker.encode.js`,
-                    );
-                    if (!res.ok) {
-                        res = await fetchT(
-                            `https://raw.githubusercontent.com/${repo}/main/_worker.encoded.js`,
-                        );
-                        if (!res.ok) {
-                            res = await fetchT(
-                                `https://raw.githubusercontent.com/${repo}/main/_worker.js`,
-                            );
-                        }
-                    }
-                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                    finalCodeToDeploy = await res.text();
-                } catch (e) {
-                    return new Response(
-                        JSON.stringify({
-                            success: false,
-                            error: "Failed to fetch from GitHub: " + e.message,
-                        }),
-                        {
-                            status: 502,
-                            headers: { "Content-Type": "application/json" },
-                        },
-                    );
-                }
-            }
-
-            if (!newVersion) {
-                const versionMatch = finalCodeToDeploy.match(
-                    /const\s+CURRENT_VERSION\s*=\s*["']([^"']+)["']/,
-                );
-                if (versionMatch) {
-                    newVersion = versionMatch[1];
+          }
+          if (网址698.pathname.includes('/sub')) {
+            const 路径部分列表 = 网址698.pathname.split('/');
+            if (路径部分列表.length === 2 && 路径部分列表[1] === 'sub') {
+              const 用户656 = 路径部分列表[0].substring(1);
+              if (是否有效格式(用户656)) {
+                if (用户656 === 认证令牌) {
+                  return await 处理订阅请求(请求735, 用户656, 网址698);
                 } else {
-                    try {
-                        const vRes = await fetchT(
-                            `https://raw.githubusercontent.com/${repo}/main/version`,
-                        );
-                        if (vRes.ok) {
-                            newVersion = (await vRes.text()).trim();
-                        }
-                    } catch (e) {}
-                }
-            }
-            if (!newVersion) newVersion = CURRENT_VERSION;
-
-            if (
-                cmpVersions(CURRENT_VERSION, newVersion) >= 0 &&
-                !data.force &&
-                !data.code
-            ) {
-                return new Response(
-                    JSON.stringify({
-                        success: false,
-                        error: "Remote version is not newer. Click force redeploy to overwrite.",
-                    }),
-                    {
-                        status: 400,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            }
-
-            const deployRes = await deployWorkerToCloudflare(
-                accountId,
-                apiToken,
-                workerName,
-                finalCodeToDeploy,
-            );
-            const deployResult = await deployRes.json();
-
-            if (deployResult.success) {
-                ctx?.waitUntil(
-                    logActivity(
-                        env,
-                        "Panel Updated",
-                        `v${CURRENT_VERSION} → v${newVersion} (encoded)`,
-                    ).catch(() => {}),
-                );
-
-                // Update all nodes with main panel update!
-                if (sysConfig.linkedPanels && Array.isArray(sysConfig.linkedPanels)) {
-                    for (const p of sysConfig.linkedPanels) {
-                        if (p && p.url && p.apiKey) {
-                            let cleanUrl = p.url.trim();
-                            if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
-                                cleanUrl = "https://" + cleanUrl;
-                            }
-                            try {
-                                const parsed = new URL(cleanUrl);
-                                const targetUrl = `${parsed.protocol}//${parsed.host}/${encodeURI(sysConfig.apiRoute)}/api/update`;
-                                ctx?.waitUntil(
-                                    fetchT(targetUrl, {
-                                        method: "POST",
-                                        headers: { "Content-Type": "application/json" },
-                                        body: JSON.stringify({
-                                            key: p.apiKey,
-                                            action: "deploy",
-                                            code: finalCodeToDeploy,
-                                            force: true
-                                        }),
-                                        signal: AbortSignal.timeout(15000)
-                                    }).then(async (r) => {
-                                        const resJson = await r.json();
-                                        await logActivity(env, "Node Update Success", `Node ${p.url} update response: ${JSON.stringify(resJson)}`);
-                                    }).catch((e) => {
-                                        logActivity(env, "Node Update Failed", `Node ${p.url} update failed: ${e.message}`);
-                                    })
-                                );
-                            } catch (err) {
-                                console.error(`Failed to trigger update on node ${p.url}:`, err);
-                            }
-                        }
+                  return new Response(JSON.stringify({
+                    error: 'UUID错误'
+                  }), {
+                    status: 403,
+                    headers: {
+                      'Content-Type': 'application/json'
                     }
+                  });
                 }
-
-                if (
-                    sysConfig.tgToken &&
-                    (sysConfig.tgAdminId || sysConfig.tgChatId)
-                ) {
-                    const tgMsg = `🔄 <b>Panel Updated</b>\n\n📦 v${CURRENT_VERSION} → v${newVersion}\n🌐 <b>Format:</b> encoded`;
-                    const notifyChatId =
-                        sysConfig.tgAdminId || sysConfig.tgChatId;
-                    ctx?.waitUntil(
-                        fetchT(
-                            `https://api.telegram.org/bot${sysConfig.tgToken}/sendMessage`,
-                            {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({
-                                    chat_id: notifyChatId,
-                                    text: tgMsg,
-                                    parse_mode: "HTML",
-                                }),
-                            },
-                        ).catch(() => {}),
-                    );
-                }
-                return new Response(
-                    JSON.stringify({
-                        success: true,
-                        message: `Updated to v${newVersion}`,
-                        newVersion,
-                    }),
-                    { headers: { "Content-Type": "application/json" } },
-                );
-            } else {
-                const errMsg =
-                    deployResult.errors?.[0]?.message || "Unknown API error";
-                return new Response(
-                    JSON.stringify({
-                        success: false,
-                        error: "Cloudflare API: " + errMsg,
-                    }),
-                    {
-                        status: 502,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
+              }
             }
+          }
         }
-
-        return new Response(
-            JSON.stringify({ success: false, error: "Invalid action" }),
-            { status: 400, headers: { "Content-Type": "application/json" } },
-        );
-    } catch (e) {
-        return new Response(
-            JSON.stringify({ success: false, error: "Internal error" }),
-            { status: 500, headers: { "Content-Type": "application/json" } },
-        );
+        if (网址698.pathname.toLowerCase().includes(`/${值路径}`)) {
+          return await 处理订阅请求(请求735, 认证令牌);
+        }
+      }
+      return new Response(JSON.stringify({
+        error: 'Not Found'
+      }), {
+        status: 404,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    } catch (错误655) {
+      return new Response(错误655.toString(), {
+        status: 500
+      });
     }
+  }
+};
+function 生成值配置654(链接列表653) {
+  return btoa(链接列表653.join('\n'));
 }
 
-async function handleApiKeys(request, env, ctx) {
-    try {
-        const url = new URL(request.url);
-        const method = request.method;
-
-        const authKey = extractAuthKey(request, null);
-        const keysGateIp =
-            request.headers.get("cf-connecting-ip") || "Unknown";
-        if (authBlocked(keysGateIp)) {
-            return new Response(
-                JSON.stringify({ success: false, error: "Too many attempts" }),
-                {
-                    status: 429,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
-        if (authKey !== sysConfig.masterKey) {
-            authFail(keysGateIp);
-            return new Response(
-                JSON.stringify({
-                    success: false,
-                    error: "Only master key can manage API keys",
-                }),
-                {
-                    status: 401,
-                    headers: { "Content-Type": "application/json" },
-                },
-            );
-        }
-
-        if (method === "GET") {
-            const keys = (sysConfig.panelApiKeys || []).map((k) => ({
-                id: k.id,
-                name: k.name,
-                keyPreview: k.key.slice(0, 8) + "..." + k.key.slice(-4),
-                createdAt: k.createdAt,
-                lastUsed: k.lastUsed,
-            }));
-            return new Response(JSON.stringify({ success: true, keys }), {
-                headers: { "Content-Type": "application/json" },
-            });
-        }
-
-        if (method === "POST") {
-            const body = await request.json();
-            if (body.action === "create") {
-                if (!sysConfig.panelApiKeys) sysConfig.panelApiKeys = [];
-                if (sysConfig.panelApiKeys.length >= 10) {
-                    return new Response(
-                        JSON.stringify({
-                            success: false,
-                            error: "Maximum 10 API keys allowed",
-                        }),
-                        {
-                            status: 400,
-                            headers: { "Content-Type": "application/json" },
-                        },
-                    );
-                }
-                const newKey = generateApiKey(body.name);
-                sysConfig.panelApiKeys.push(newKey);
-                await cachedD1Put(env, "sys_config", JSON.stringify(sysConfig));
-                ctx?.waitUntil(
-                    logActivity(
-                        env,
-                        "API Key Created",
-                        `Key "${newKey.name}" created`,
-                    ).catch(() => {}),
-                );
-                return new Response(
-                    JSON.stringify({ success: true, key: newKey }),
-                    {
-                        status: 201,
-                        headers: { "Content-Type": "application/json" },
-                    },
-                );
-            }
-            if (body.action === "revoke") {
-                if (!body.id)
-                    return new Response(
-                        JSON.stringify({
-                            success: false,
-                            error: "ID required",
-                        }),
-                        {
-                            status: 400,
-                            headers: { "Content-Type": "application/json" },
-                        },
-                    );
-                const idx = (sysConfig.panelApiKeys || []).findIndex(
-                    (k) => k.id === body.id,
-                );
-                if (idx === -1)
-                    return new Response(
-                        JSON.stringify({
-                            success: false,
-                            error: "Key not found",
-                        }),
-                        {
-                            status: 404,
-                            headers: { "Content-Type": "application/json" },
-                        },
-                    );
-                const revoked = sysConfig.panelApiKeys.splice(idx, 1)[0];
-                await cachedD1Put(env, "sys_config", JSON.stringify(sysConfig));
-                ctx?.waitUntil(
-                    logActivity(
-                        env,
-                        "API Key Revoked",
-                        `Key "${revoked.name}" revoked`,
-                    ).catch(() => {}),
-                );
-                return new Response(
-                    JSON.stringify({ success: true, revoked: revoked.id }),
-                    { headers: { "Content-Type": "application/json" } },
-                );
-            }
-        }
-
-        return new Response(
-            JSON.stringify({ success: false, error: "Invalid request" }),
-            { status: 400, headers: { "Content-Type": "application/json" } },
-        );
-    } catch (e) {
-        return new Response(
-            JSON.stringify({ success: false, error: e.message }),
-            { status: 500, headers: { "Content-Type": "application/json" } },
-        );
-    }
-}
-
-async function handleAuth(request, hostName, ctx, env) {
-    try {
-        const data = await request.json();
-        const ip = request.headers.get("cf-connecting-ip") || "Unknown";
-        if (authBlocked(ip)) {
-            return new Response(
-                JSON.stringify({
-                    success: false,
-                    error: "Too many attempts, try later",
-                }),
-                { status: 429 },
-            );
-        }
-        const loginKey = data.key || "";
-        const isKeyAuth =
-            loginKey === sysConfig.masterKey || isPanelApiKey(loginKey);
-        if (isKeyAuth) {
-            authClear(ip);
-            if (isPanelApiKey(loginKey)) {
-                const apiKeyEntry = (sysConfig.panelApiKeys || []).find(
-                    (k) => k.key === loginKey,
-                );
-                if (apiKeyEntry) apiKeyEntry.lastUsed = Date.now();
-            }
-            ctx?.waitUntil(
-                logActivity(
-                    env,
-                    "Auth Success",
-                    `Successful panel login from ${ip} (via ${isPanelApiKey(loginKey) ? "API Key" : "Master Key"})`,
-                ),
-            );
-            if (!sysConfig.silentAlerts && ctx)
-                ctx.waitUntil(
-                    sendTelegramMessage(
-                        request,
-                        "ورود به پنل (موفق)",
-                        hostName,
-                    ),
-                );
-
-            // Store login signal for Telegram bot
-            if (sysConfig.tgAdminId && env.IOT_DB) {
-                const loginSignal = {
-                    name: sysConfig.name || hostName,
-                    host: hostName,
-                    apiRoute: sysConfig.apiRoute,
-                    masterKey: sysConfig.masterKey,
-                    isLocal: true,
-                    ts: Date.now(),
-                };
-                ctx?.waitUntil(
-                    d1Put(
-                        env,
-                        "tg_panel_login",
-                        JSON.stringify(loginSignal),
-                    ).catch(() => {}),
-                );
-            }
-
-            // Notify hub panel if configured
-            if (
-                sysConfig.hubPanelUrl &&
-                sysConfig.hubPanelUrl.trim() &&
-                sysConfig.tgAdminId
-            ) {
-                try {
-                    let hubUrl = sysConfig.hubPanelUrl.trim();
-                    if (!hubUrl.startsWith("http"))
-                        hubUrl = "https://" + hubUrl;
-                    const signalPayload = {
-                        signal: "panel_login",
-                        panelName: sysConfig.name || hostName,
-                        panelHost: hostName,
-                        panelApiRoute: sysConfig.apiRoute,
-                        tgAdminId: sysConfig.tgAdminId,
-                        ts: Date.now(),
-                    };
-                    ctx?.waitUntil(
-                        fetchT(
-                            `${hubUrl}/${encodeURI(sysConfig.apiRoute)}/tg/sync_panel`,
-                            {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify(signalPayload),
-                            },
-                        ).catch(() => {}),
-                    );
-                } catch (e) {}
-            }
-
-            const netInfo = {
-                ip: ip,
-                colo: request.cf?.colo || "Unknown",
-                loc:
-                    (request.cf?.city || "Unknown") +
-                    ", " +
-                    (request.cf?.country || "Unknown"),
-            };
-            let usageData = {};
-            for (let [k, v] of uuidUsage.entries()) usageData[k] = { ...v, connects: activeConns.get(k) || 0 };
-            let baseHost = hostName;
-            let protocol = "https";
-            if (sysConfig.customPanelUrl && sysConfig.customPanelUrl.trim()) {
-                let customUrlStr = sysConfig.customPanelUrl.trim();
-                if (
-                    !customUrlStr.startsWith("http://") &&
-                    !customUrlStr.startsWith("https://")
-                ) {
-                    customUrlStr = "https://" + customUrlStr;
-                }
-                try {
-                    const customUrl = new URL(customUrlStr);
-                    baseHost = customUrl.host;
-                    protocol = customUrl.protocol.replace(":", "");
-                } catch (e) {}
-            }
-            return new Response(
-                JSON.stringify({
-                    success: true,
-                    config: isPanelApiKey(loginKey)
-                        ? {
-                              ...sysConfig,
-                              masterKey: "[PROTECTED]",
-                              panelApiKeys: "[PROTECTED]",
-                              cfApiToken: "[PROTECTED]",
-                              cfAccountId: "[PROTECTED]",
-                              cfWorkerName: "[PROTECTED]",
-                              tgToken: "[PROTECTED]",
-                              tgChatId: "[PROTECTED]",
-                              tgAdminId: "[PROTECTED]",
-                              syncApiKey: "[PROTECTED]",
-                          }
-                        : sysConfig,
-                    deviceId: activeDeviceId,
-                    network: netInfo,
-                    usage: usageData,
-                    sysUsage:
-                        sysUsageCache && sysUsageCache.users
-                            ? sysUsageCache.users
-                            : {},
-                    version: CURRENT_VERSION,
-                    profiles: getAllProfiles().map((p) => {
-                        let subSuffix =
-                            p.name === "Default"
-                                ? ""
-                                : "?sub=" + encodeURIComponent(p.name);
-                        return {
-                            name: p.name,
-                            id: p.id,
-                            sync: `${protocol}://${baseHost}/${sysConfig.apiRoute}${subSuffix}`,
-                        };
-                    }),
-                }),
-                { status: 200 },
-            );
-        }
-        ctx?.waitUntil(
-            logActivity(env, "Auth Failed", `Failed login attempt from ${ip}`),
-        );
-        authFail(ip);
-        if (ctx)
-            ctx.waitUntil(
-                sendTelegramMessage(
-                    request,
-                    "تلاش ناموفق ورود به پنل!",
-                    hostName,
-                ),
-            );
-        return new Response(JSON.stringify({ success: false }), {
-            status: 401,
-        });
-    } catch (e) {
-        return new Response(JSON.stringify({ success: false }), {
-            status: 400,
-        });
-    }
-}
-
-async function handleConfigSync(request, env, ctx) {
-    try {
-        const data = await request.json();
-        const syncGateIp =
-            request.headers.get("cf-connecting-ip") || "Unknown";
-        if (authBlocked(syncGateIp)) {
-            return new Response(
-                JSON.stringify({
-                    success: false,
-                    error: "Too many attempts",
-                }),
-                { status: 429 },
-            );
-        }
-        const isAuthSync =
-            data.key === sysConfig.masterKey ||
-            (data.oldKey && data.oldKey === sysConfig.masterKey) ||
-            isPanelApiKey(data.key) ||
-            isPanelApiKey(data.oldKey) ||
-            (data.fromMaster &&
-                data.config &&
-                data.config.masterKey &&
-                data.config.masterKey === sysConfig.masterKey);
-        if (!isAuthSync) {
-            authFail(syncGateIp);
-            return new Response(
-                JSON.stringify({
-                    success: false,
-                    error: "Auth failed. Generate the API key on THIS panel, not the main panel.",
-                }),
-                { status: 401 },
-            );
-        }
-        if (!env.IOT_DB)
-            return new Response(
-                JSON.stringify({ success: false, msg: "DB Error" }),
-                { status: 400 },
-            );
-
-        let nextConfig = sysConfig;
-        if (data.config) {
-            const preserveApiKeys = sysConfig.panelApiKeys || [];
-            nextConfig = { ...sysConfig, ...data.config };
-            if (Array.isArray(nextConfig.users)) {
-                nextConfig.users = nextConfig.users.map(u => ({...u}));
-            }
-            if (
-                preserveApiKeys.length > 0 &&
-                (!data.config.panelApiKeys ||
-                    data.config.panelApiKeys.length === 0)
-            ) {
-                nextConfig.panelApiKeys = preserveApiKeys;
-            }
-            migrateSlaveNodesToLinkedPanels(nextConfig);
-            if (
-                Array.isArray(nextConfig.users) &&
-                nextConfig.users.length > 0
-            ) {
-                const geoPromises = nextConfig.users.map(async (u) => {
-                    if (u.proxyIp) {
-                        await resolveUserProxyIpGeo(u);
-                    } else {
-                        u.proxyIpGeo = null;
-                    }
-                });
-                await Promise.all(geoPromises);
-            }
-            sysConfig = nextConfig;
-            await cachedD1Put(env, "sys_config", JSON.stringify(nextConfig));
-        }
-
-        let tagWarning = null;
-        if (
-            nextConfig.nameStrategy &&
-            nextConfig.nameStrategy.includes("{") &&
-            nextConfig.nameStrategy.includes("}")
-        ) {
-            let vResult = validateNameStrategy(nextConfig.nameStrategy);
-            if (!vResult.valid)
-                tagWarning = `Unknown tags detected: ${vResult.unknownTags.join(", ")}`;
-        }
-
-        if (data.resetUUID) {
-            const uuidClean = data.resetUUID.replace(/-/g, "").toLowerCase();
-            if (!sysUsageCache) sysUsageCache = { users: {} };
-            if (!sysUsageCache.users) sysUsageCache.users = {};
-            if (sysUsageCache.users[uuidClean]) {
-                sysUsageCache.users[uuidClean].reqs = 0;
-                sysUsageCache.users[uuidClean].dReqs = 0;
-            } else {
-                sysUsageCache.users[uuidClean] = {
-                    reqs: 0,
-                    dReqs: 0,
-                    lastDay: new Date().toISOString().split("T")[0],
-                };
-            }
-            await cachedD1Put(env, "sys_usage", JSON.stringify(sysUsageCache));
-        }
-
-        if (data.config && !data.fromMaster) {
-            let currentHost = new URL(request.url).hostname;
-            let slaveConfig = { ...nextConfig };
-            [
-                "cfAccountId",
-                "cfApiToken",
-                "cfWorkerName",
-                "tgToken",
-                "tgChatId",
-                "tgAdminId",
-                "masterKey",
-                "syncApiKey",
-                "apiRoute",
-                "deviceId",
-                "panelApiKeys",
-                "hubPanelUrl",
-                "linkedPanels",
-                "slaveNodes",
-                "githubRepo",
-                "customPanelUrl"
-            ].forEach((k) => delete slaveConfig[k]);
-
-            // Propagate config to slaveNodes
-            if (nextConfig.slaveNodes && nextConfig.slaveNodes.trim().length > 0) {
-                let nodes = nextConfig.slaveNodes
-                    .split(/[\r\n,;]+/)
-                    .map((s) => s.trim())
-                    .filter(Boolean);
-                let syncKey = nextConfig.syncApiKey || "";
-                nodes.forEach((node) => {
-                    if (node !== currentHost) {
-                        ctx?.waitUntil(
-                            fetchT(
-                                `https://${node}/${encodeURI(nextConfig.apiRoute)}/api/sync`,
-                                {
-                                    method: "POST",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({
-                                        key: syncKey,
-                                        config: slaveConfig,
-                                        fromMaster: true,
-                                    }),
-                                },
-                            ).catch(() => {}),
-                        );
-                    }
-                });
-            }
-
-            // Propagate config to linkedPanels
-            if (nextConfig.linkedPanels && Array.isArray(nextConfig.linkedPanels)) {
-                nextConfig.linkedPanels.forEach((p) => {
-                    if (p && p.url && p.apiKey) {
-                        let cleanUrl = p.url.trim();
-                        if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
-                            cleanUrl = "https://" + cleanUrl;
-                        }
-                        try {
-                            const parsed = new URL(cleanUrl);
-                            if (parsed.hostname !== currentHost) {
-                                ctx?.waitUntil(
-                                    fetchT(
-                                        `${parsed.protocol}//${parsed.host}/${encodeURI(nextConfig.apiRoute)}/api/sync`,
-                                        {
-                                            method: "POST",
-                                            headers: { "Content-Type": "application/json" },
-                                            body: JSON.stringify({
-                                                key: p.apiKey,
-                                                config: slaveConfig,
-                                                fromMaster: true,
-                                            }),
-                                        },
-                                    ).catch(() => {}),
-                                );
-                            }
-                        } catch (err) {
-                            console.error(`Failed to propagate config to linked panel ${p.url}:`, err);
-                        }
-                    }
-                });
-            }
-        }
-
-        if (nextConfig.tgToken && ctx) {
-            const hookUrl = `https://${new URL(request.url).hostname}/${encodeURI(nextConfig.apiRoute)}/tg`;
-            ctx.waitUntil(
-                fetchT(
-                    `https://api.telegram.org/bot${nextConfig.tgToken}/setWebhook`,
-                    {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ url: hookUrl }),
-                    },
-                ).catch(() => {}),
-            );
-        }
-
-        return new Response(
-            JSON.stringify({
-                success: true,
-                newRoute: nextConfig.apiRoute,
-                tagWarning,
-            }),
-            { status: 200 },
-        );
-    } catch (e) {
-        return new Response(JSON.stringify({ success: false }), {
-            status: 400,
-        });
-    }
-}
-
-async function handleSyncPanel(request, env, ctx) {
-    try {
-        const data = await request.json();
-        if (!data.signal || data.signal !== "panel_login") {
-            return new Response(
-                JSON.stringify({ success: false, error: "Invalid signal" }),
-                { status: 400 },
-            );
-        }
-        if (!data.tgAdminId || !data.panelHost) {
-            return new Response(
-                JSON.stringify({ success: false, error: "Missing fields" }),
-                { status: 400 },
-            );
-        }
-        // Verify the tgAdminId matches this panel's config
-        const adminId = sysConfig.tgAdminId || sysConfig.tgChatId;
-        if (!adminId || adminId.toString() !== data.tgAdminId.toString()) {
-            return new Response(
-                JSON.stringify({ success: false, error: "Unauthorized" }),
-                { status: 401 },
-            );
-        }
-        // Also verify a valid panelApiKey if one was provided
-        if (data.panelApiKey && !isPanelApiKey(data.panelApiKey)) {
-            return new Response(
-                JSON.stringify({ success: false, error: "Unauthorized" }),
-                { status: 401 },
-            );
-        }
-        const loginSignal = {
-            name: data.panelName || data.panelHost,
-            host: data.panelHost,
-            apiRoute: data.panelApiRoute || sysConfig.apiRoute,
-            isLocal: false,
-            ts: data.ts || Date.now(),
+// 解析分享链接并生成客户端节点配置
+function 解析链接值值节点(链接652) {
+  try {
+    // 解析第一类链接
+    if (链接652.startsWith(解码64('dmxlc3M6Ly8='))) {
+      const 网址651 = new URL(链接652);
+      const 名称650 = decodeURIComponent(网址651.hash.substring(1));
+      const 唯一标识649 = 网址651.username;
+      const 本地值648 = 网址651.hostname;
+      const 端口647 = parseInt(网址651.port) || 443;
+      const 参数646 = new URLSearchParams(网址651.search);
+      const 传输层安全645 = 参数646.get('security') === 'tls' || 参数646.get('tls') === 'true';
+      const 本地值644 = 参数646.get('type') || 'ws';
+      const 路径643 = 参数646.get('path') || '/?ed=2048';
+      const 主机642 = 参数646.get('host') || 本地值648;
+      const 本地值641 = 参数646.get('sni') || 主机642;
+      const 应用层协议协商原始640 = 参数646.get('alpn') || '';
+      const 本地值639 = 参数646.get('fp') || 参数646.get('client-fingerprint') || 'chrome';
+      const 加密客户端问候638 = 参数646.get('ech');
+      const 节点637 = {
+        name: 名称650,
+        type: 解码64('dmxlc3M='),
+        server: 本地值648,
+        port: 端口647,
+        uuid: 唯一标识649,
+        tls: 传输层安全645,
+        network: 本地值644,
+        'client-fingerprint': 本地值639
+      };
+      if (传输层安全645) {
+        节点637.servername = 本地值641;
+        if (应用层协议协商原始640) 节点637.alpn = 应用层协议协商原始640.split(',').map(甲值636 => 甲值636.trim()).filter(Boolean);
+        节点637['skip-cert-verify'] = false;
+      }
+      if (本地值644 === 'ws') {
+        节点637['ws-opts'] = {
+          path: 路径643,
+          headers: {
+            Host: 主机642
+          }
         };
-        if (env.IOT_DB) {
-            ctx?.waitUntil(
-                d1Put(env, "tg_panel_login", JSON.stringify(loginSignal)).catch(
-                    () => {},
-                ),
-            );
-        }
-        return new Response(JSON.stringify({ success: true }), { status: 200 });
-    } catch (e) {
-        return new Response(JSON.stringify({ success: false }), {
-            status: 400,
-        });
+      }
+      if (加密客户端问候638) {
+        const 加密客户端问候域名635 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+        节点637['ech-opts'] = {
+          enable: true,
+          'query-server-name': 加密客户端问候域名635
+        };
+      }
+      return 节点637;
     }
+
+    // 解析第二类链接
+    if (链接652.startsWith(解码64('dHJvamFuOi8v'))) {
+      const 网址634 = new URL(链接652);
+      const 名称633 = decodeURIComponent(网址634.hash.substring(1));
+      const 密码632 = 网址634.username;
+      const 本地值631 = 网址634.hostname;
+      const 端口630 = parseInt(网址634.port) || 443;
+      const 参数629 = new URLSearchParams(网址634.search);
+      const 本地值628 = 参数629.get('type') || 'ws';
+      const 路径 = 参数629.get('path') || '/?ed=2048';
+      const 主机627 = 参数629.get('host') || 本地值631;
+      const 服务名称指示626 = 参数629.get('sni') || 主机627;
+      const 应用层协议协商原始 = 参数629.get('alpn') || '';
+      const 加密客户端问候 = 参数629.get('ech');
+      const 节点 = {
+        name: 名称633,
+        type: 解码64('dHJvamFu'),
+        server: 本地值631,
+        port: 端口630,
+        password: 密码632,
+        network: 本地值628,
+        sni: 服务名称指示626,
+        'skip-cert-verify': false
+      };
+      if (应用层协议协商原始) 节点.alpn = 应用层协议协商原始.split(',').map(甲值625 => 甲值625.trim()).filter(Boolean);
+      if (本地值628 === 'ws') {
+        节点['ws-opts'] = {
+          path: 路径,
+          headers: {
+            Host: 主机627
+          }
+        };
+      }
+      if (加密客户端问候) {
+        const 加密客户端问候域名624 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+        节点['ech-opts'] = {
+          enable: true,
+          'query-server-name': 加密客户端问候域名624
+        };
+      }
+      return 节点;
+    }
+  } catch (事件值623) {
+    return null;
+  }
+  return null;
 }
 
-const botI18n = {
-    en: {
-        welcome:
-            "🤖 **Welcome to Nahan Gateway Bot**\nSelect your option below to manage your system:",
-        status: "System Status",
-        users: "Subscribers",
-        metrics: "Gateway Health",
-        panic: "Panic Mode",
-        dash: "Dashboard Control",
-        lang: "🌐 Change Language",
-        active: "🟢 Active",
-        paused: "🔴 Paused",
-        uptime: "Uptime",
-        streams: "📡 Active Streams",
-        no_users: "No subscribers found.",
-        sub_info: "👤 Subscriber Details:",
-        name: "Name",
-        total: "Total Reqs",
-        daily: "Daily Reqs",
-        expiry: "Expiry",
-        days: "Days remaining",
-        created: "Created At",
-        unlimited: "Unlimited",
-        btn_back: "◀️ Back",
-        btn_next: "▶️ Next",
-        btn_del: "Delete",
-        btn_pause: "Pause",
-        btn_resume: "Resume",
-        btn_edit_name: "Change Name",
-        btn_edit_limits: "Limits",
-        btn_add: "+ Add Subscriber",
-        btn_confirm: "Confirm",
-        btn_cancel: "Cancel",
-        msg_enter_name: "Please send a name for the subscriber:",
-        msg_added: "Sub added successfully! 🎉",
-        msg_deleted: "Sub deleted successfully! 🗑️",
-        msg_panic:
-            "🚨 PANIC MODE ACTIVATED 🚨\nRoute randomized & System Paused.",
-        msg_invalid: "Invalid input. Please try again.",
-        msg_enter_limits:
-            "Enter limits format:\n`[totalReqs] [dailyReqs] [days_limit]`\n(Use 0 for unlimited)\n\nExample:\n`10000 500 30`",
-        msg_confirm_del: "⚠️ Are you sure you want to delete this subscriber?",
-        msg_confirm_panic:
-            "⚠️ Are you absolutely sure you want to trigger PANIC mode? This will randomize API routes and pause all connections!",
-        status_updated: "Status updated!",
-        access_denied:
-            "Access Denied. You are not authorized to manage this panel.",
-        dashboard: "Dashboard",
-        search: "Search User",
-        statistics: "Statistics",
-        panel_info: "Panel Info",
-        disabled_users: "Disabled Users",
-        reset_traffic: "Reset Traffic",
-        extend_expiry: "Extend Expiry",
-        notes: "Notes",
-        device_limit: "Config Limit",
-        msg_enter_search:
-            "🔍 Send a username, UUID, or subscription to search:",
-        msg_enter_notes: "📝 Send notes for this user:",
-        msg_enter_extend_days: "📅 Enter number of days to extend expiration:",
-        msg_traffic_reset: "Traffic has been reset successfully!",
-        msg_expiry_extended: "Expiration extended by {days} days!",
-        msg_no_disabled: "No disabled users found.",
-        msg_enter_device_limit: "Enter config limit (0 for unlimited):",
-        config_limit_updated: "Config limit updated!",
-        stats_title: "Panel Statistics",
-        count_active: "active",
-        count_paused: "paused",
-        count_disabled: "auto-disabled",
-        dash_total: "Total Users",
-        dash_active: "Active",
-        dash_paused: "Paused",
-        dash_expired: "Expired",
-        dash_auto_disabled: "Auto-Disabled",
-        btn_main_menu: "Main Menu",
-        btn_back_to_list: "Back to List",
-        total_traffic: "Total Traffic",
-        daily_traffic: "Daily Traffic",
-        lbl_status: "Status",
-        lbl_subscription: "Subscription Connection",
-        lbl_user_not_found: "⚠️ User not found",
-        lbl_none: "None",
-        lbl_page: "Page",
-        select_panel: "🔌 Which panel do you want to manage?",
-        current_panel: "Current Panel",
-        switch_panel: "🔄 Switch Panel",
-        panel_local: "🏠 This Panel",
-        panel_remote: "🌐",
-        msg_panel_selected: "Panel selected! ✅",
-        msg_panel_error: "❌ Failed to connect to the selected panel.",
-        msg_panel_unreachable:
-            "⚠️ Panel is unreachable. Please check the configuration.",
-        btn_sub_link: "Subscription Link",
-        sub_link_sent: "Subscription link sent!",
-        btn_update_usage: "Update Usage",
-        tg_settings: "Settings",
-        tg_advanced: "Advanced",
-        tg_logs: "Logs",
-        tg_sys_settings: "System Settings",
-        tg_adv_settings: "Advanced Settings",
-        tg_logs_view: "View Logs",
-        tg_logs_clear: "Clear Logs",
-        tg_proto: "Protocol",
-        tg_ports: "Ports",
-        tg_uuid: "Device UUID",
-        tg_path: "API Route",
-        tg_pass: "Master Key",
-        tg_dns: "DNS",
-        tg_relay: "Relay IP",
-        tg_maintenance: "Maintenance Hosts",
-        tg_tfo: "TCP Fast Open",
-        tg_ech: "ECH",
-        tg_silent: "Silent Alerts",
-        tg_pause: "Kill Switch",
-        tg_auto_update: "Auto Update",
-        tg_direct: "Direct Configs",
-        tg_nat64: "NAT64",
-        tg_clean_ips: "Clean IPs",
-        tg_nodes: "Nodes",
-        tg_strategy: "Name Strategy",
-        tg_prefix: "Name Prefix",
-        tg_fake_entries: "Fake Entries",
-        tg_cf_settings: "Cloudflare Settings",
-        tg_tg_settings: "Telegram Settings",
-        tg_backup: "Backup",
-        tg_restore: "Restore",
-        tg_current_val: "Current Value",
-        tg_new_val: "Send new value:",
-        tg_saved: "Saved!",
-        tg_cancelled: "Cancelled",
-        tg_log_entry: "",
-        tg_log_empty: "No logs found",
-        tg_u_custom_name: "Custom Name",
-        tg_u_clean_ips: "Clean IPs",
-        tg_u_proxy_ips: "Proxy IPs",
-        tg_u_nodes: "Nodes",
-        tg_u_nat64: "NAT64",
-        tg_u_mode: "Protocol Mode",
-        tg_u_ports: "Ports",
-        tg_u_conn_limit: "Conn Limit",
-        tg_u_panel_url: "Panel URL",
-        tg_u_max_cfg: "Max Configs",
-        tg_u_all: "All Settings",
-        tg_network: "Network",
-        tg_uptime: "Uptime",
-        tg_conns: "Active Connections",
-        tg_version: "Version",
-        tg_cf_usage: "CF Usage",
+// ============================================================
+// 内部格式转换器 - 不依赖外部服务
+// ============================================================
+
+// 用于 YAML 引号包裹（避免 IPv6 方括号、逗号等被解析为数组）
+function 处理本地值622(取值621) {
+  if (取值621 == null) return '""';
+  const 字符串值620 = String(取值621);
+  return '"' + 字符串值620.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+}
+
+// URL.hostname 对 IPv6 会带方括号，直接写入 YAML 会被当成数组
+function 规范化值主机(主机名619) {
+  if (!主机名619) return 主机名619;
+  const 头值618 = String(主机名619);
+  if (头值618.startsWith('[') && 头值618.endsWith(']')) return 头值618.slice(1, -1);
+  return 头值618;
+}
+
+// 策略组列表：策略组 + 全部节点（避免分组里只有「节点选择」没有具体节点）
+function 处理值选择值(名称列表617, 本地值616 = {}) {
+  const {
+    directFirst: 直连首次615 = false,
+    extraGroups: 值值614 = []
+  } = 本地值616;
+  const 节点行列表 = 名称列表617.length ? 名称列表617.map(数量值613 => `      - ${处理本地值622(数量值613)}`).join('\n') : '      - DIRECT';
+  const 行列表612 = [];
+  if (直连首次615) {
+    行列表612.push('      - "🎯 全球直连"', '      - "🚀 节点选择"');
+  } else {
+    行列表612.push('      - "🚀 节点选择"', '      - "🎯 全球直连"');
+  }
+  for (const 本地值611 of 值值614) 行列表612.push(`      - ${处理本地值622(本地值611)}`);
+  行列表612.push(节点行列表);
+  return 行列表612.join('\n');
+}
+
+// 圈类客户端策略组列表：策略组 + 全部节点
+function 处理值值列表(名称列表610, 本地值609 = {}) {
+  const {
+    directFirst: 直连首次 = false,
+    extraGroups: 值值608 = [],
+    compact: 本地值607 = false
+  } = 本地值609;
+  const 本地值606 = 本地值607 ? ',' : ', ';
+  const 列表605 = 名称列表610.length ? 名称列表610.join(本地值606) : 'DIRECT';
+  const 部分列表604 = [];
+  if (直连首次) 部分列表604.push('🎯 全球直连', '🚀 节点选择');else 部分列表604.push('🚀 节点选择', '🎯 全球直连');
+  部分列表604.push(...值值608);
+  if (名称列表610.length) 部分列表604.push(列表605);
+  return 部分列表604.join(本地值606);
+}
+
+// 解析任意分享链接为通用节点对象
+function 解析值链接(链接603) {
+  try {
+    if (链接603.startsWith(解码64('dmxlc3M6Ly8='))) {
+      const 网址602 = new URL(链接603);
+      const 参数值601 = new URLSearchParams(网址602.search);
+      return {
+        proto: 解码64('dmxlc3M='),
+        name: decodeURIComponent(网址602.hash.substring(1)) || 网址602.hostname + ':' + 网址602.port,
+        uuid: 网址602.username,
+        server: 规范化值主机(网址602.hostname),
+        port: parseInt(网址602.port) || 443,
+        tls: 参数值601.get('security') === 'tls' || 参数值601.get('security') === 解码64('cmVhbGl0eQ=='),
+        network: 参数值601.get('type') || 'ws',
+        path: 参数值601.get('path') || '/?ed=2048',
+        host: 规范化值主机(参数值601.get('host') || 网址602.hostname),
+        sni: 规范化值主机(参数值601.get('sni') || 参数值601.get('host') || 网址602.hostname),
+        alpn: (参数值601.get('alpn') || '').split(',').map(字符串值600 => 字符串值600.trim()).filter(Boolean),
+        fp: 参数值601.get('fp') || 'chrome',
+        flow: 参数值601.get('flow') || '',
+        encryption: 参数值601.get('encryption') || 'none',
+        mode: 参数值601.get('mode') || '',
+        ech: 参数值601.get('ech') || ''
+      };
+    }
+    if (链接603.startsWith(解码64('dHJvamFuOi8v'))) {
+      const 网址599 = new URL(链接603);
+      const 参数值 = new URLSearchParams(网址599.search);
+      return {
+        proto: 解码64('dHJvamFu'),
+        name: decodeURIComponent(网址599.hash.substring(1)) || 网址599.hostname + ':' + 网址599.port,
+        password: decodeURIComponent(网址599.username),
+        server: 规范化值主机(网址599.hostname),
+        port: parseInt(网址599.port) || 443,
+        tls: true,
+        network: 参数值.get('type') || 'ws',
+        path: 参数值.get('path') || '/?ed=2048',
+        host: 规范化值主机(参数值.get('host') || 网址599.hostname),
+        sni: 规范化值主机(参数值.get('sni') || 参数值.get('host') || 网址599.hostname),
+        alpn: (参数值.get('alpn') || '').split(',').map(字符串值598 => 字符串值598.trim()).filter(Boolean),
+        fp: 参数值.get('fp') || 'chrome',
+        ech: 参数值.get('ech') || ''
+      };
+    }
+  } catch (事件值597) {}
+  return null;
+}
+
+// 单个节点 → 块级 YAML（避免 flow style 解析错误）
+function 构建值节点行(数量值596) {
+  const 行列表595 = [];
+  const 本地值594 = 规范化值主机(数量值596.server);
+  const 主机593 = 规范化值主机(数量值596.host) || 本地值594;
+  const 服务名称指示592 = 规范化值主机(数量值596.sni) || 主机593;
+  行列表595.push(`  - name: ${处理本地值622(数量值596.name)}`);
+  行列表595.push(`    type: ${数量值596.proto}`);
+  行列表595.push(`    server: ${处理本地值622(本地值594)}`);
+  行列表595.push(`    port: ${数量值596.port}`);
+  if (数量值596.proto === 解码64('dmxlc3M=')) {
+    行列表595.push(`    uuid: ${数量值596.uuid}`);
+    行列表595.push(`    udp: true`);
+    行列表595.push(`    tls: ${数量值596.tls ? 'true' : 'false'}`);
+    if (数量值596.flow) 行列表595.push(`    flow: ${处理本地值622(数量值596.flow)}`);
+    行列表595.push(`    client-fingerprint: ${处理本地值622(数量值596.fp || 'chrome')}`);
+  } else if (数量值596.proto === 解码64('dHJvamFu')) {
+    行列表595.push(`    password: ${处理本地值622(数量值596.password)}`);
+    行列表595.push(`    udp: true`);
+    行列表595.push(`    client-fingerprint: ${处理本地值622(数量值596.fp || 'chrome')}`);
+  }
+  if (数量值596.tls) {
+    行列表595.push(`    servername: ${处理本地值622(服务名称指示592)}`);
+    if (数量值596.alpn && 数量值596.alpn.length) {
+      行列表595.push(`    alpn: [${数量值596.alpn.map(甲值591 => 处理本地值622(甲值591)).join(', ')}]`);
+    }
+    行列表595.push(`    skip-cert-verify: false`);
+  }
+  if (数量值596.network === 'ws' || 数量值596.network === 'xhttp') {
+    行列表595.push(`    network: ws`);
+    行列表595.push(`    ws-opts:`);
+    行列表595.push(`      path: ${处理本地值622(数量值596.path)}`);
+    行列表595.push(`      headers:`);
+    行列表595.push(`        Host: ${处理本地值622(主机593)}`);
+  } else if (数量值596.network === 'grpc') {
+    行列表595.push(`    network: grpc`);
+    行列表595.push(`    grpc-opts:`);
+    行列表595.push(`      grpc-service-name: ${处理本地值622(数量值596.path)}`);
+  }
+  if (数量值596.ech) {
+    const 加密客户端问候域名590 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+    行列表595.push(`    ech-opts:`);
+    行列表595.push(`      enable: true`);
+    行列表595.push(`      query-server-name: ${处理本地值622(加密客户端问候域名590)}`);
+  }
+  return 行列表595.join('\n');
+}
+
+// 内部生成 YAML（完整规则集，远端 rule-providers）
+function 生成值值589(链接列表588, 本地值587 = {}) {
+  const 节点列表586 = 链接列表588.map(解析值链接).filter(数量值585 => 数量值585 && (数量值585.proto === 解码64('dmxlc3M=') || 数量值585.proto === 解码64('dHJvamFu')));
+  const 名称列表584 = 节点列表586.map(数量值583 => 数量值583.name);
+  const 域名系统值582 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+  const 头部581 = ['mixed-port: 7890', 'allow-lan: true', 'mode: rule', 'log-level: info', 'ipv6: true', 'external-controller: 127.0.0.1:9090', 'unified-delay: true', 'tcp-concurrent: true', 'geodata-mode: true', 'geo-auto-update: true', 'geo-update-interval: 24', 'geox-url:', '  geoip: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"', '  geosite: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"', '  mmdb: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb"', '  asn: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/GeoLite2-ASN.mmdb"', 'sniffer:', '  enable: true', '  force-dns-mapping: true', '  parse-pure-ip: true', '  sniff:', '    HTTP:', '      ports: [80, 8080-8880]', '      override-destination: true', '    TLS:', '      ports: [443, 8443]', '    QUIC:', '      ports: [443, 8443]', 'dns:', '  enable: true', '  listen: 0.0.0.0:1053', '  ipv6: true', '  enhanced-mode: fake-ip', '  fake-ip-range: 198.18.0.1/16', '  fake-ip-filter:', '    - "*.lan"', '    - "+.local"', '    - "+.market.xiaomi.com"', '    - "+.msftconnecttest.com"', '    - "+.msftncsi.com"', '    - "localhost.ptlogin2.qq.com"', '    - "+.srv.nintendo.net"', '    - "+.stun.playstation.net"', '    - "+.xboxlive.com"', '  default-nameserver:', '    - 223.5.5.5', '    - 119.29.29.29', '  nameserver:', `    - ${域名系统值582}`, '    - https://119.29.29.29/dns-query', '  fallback:', '    - https://1.1.1.1/dns-query', '    - https://8.8.8.8/dns-query', '  fallback-filter:', '    geoip: true', '    geoip-code: CN', '    ipcidr:', '      - 240.0.0.0/4', ''];
+  const 值值580 = ['proxies:'];
+  for (const 数量值579 of 节点列表586) 值值580.push(构建值节点行(数量值579));
+  const 节点仅 = 名称列表584.length ? 名称列表584.map(数量值578 => `      - ${处理本地值622(数量值578)}`).join('\n') : '      - DIRECT';
+  const 值值577 = [解码64('cHJveHktZ3JvdXBzOg=='), '  - name: "🚀 节点选择"', '    type: select', '    proxies:', '      - "🎯 全球直连"', 节点仅, '  - name: "🌍 国外媒体"', '    type: select', '    proxies:', 处理值选择值(名称列表584), '  - name: "📺 哔哩哔哩"', '    type: select', '    proxies:', 处理值选择值(名称列表584, {
+    directFirst: true
+  }), '  - name: "📹 油管视频"', '    type: select', '    proxies:', 处理值选择值(名称列表584, {
+    extraGroups: ['🌍 国外媒体']
+  }), '  - name: "🎬 奈飞视频"', '    type: select', '    proxies:', 处理值选择值(名称列表584, {
+    extraGroups: ['🌍 国外媒体']
+  }), '  - name: "📲 电报信息"', '    type: select', '    proxies:', 处理值选择值(名称列表584), '  - name: "🌐 谷歌服务"', '    type: select', '    proxies:', 处理值选择值(名称列表584), '  - name: "🤖 OpenAI"', '    type: select', '    proxies:', 处理值选择值(名称列表584), '  - name: "Ⓜ️ 微软服务"', '    type: select', '    proxies:', 处理值选择值(名称列表584, {
+    directFirst: true
+  }), '  - name: "🍎 苹果服务"', '    type: select', '    proxies:', 处理值选择值(名称列表584, {
+    directFirst: true
+  }), '  - name: "🎯 全球直连"', '    type: select', '    proxies:', '      - DIRECT', '  - name: "🛑 全球拦截"', '    type: select', '    proxies:', '      - REJECT', '      - DIRECT', '  - name: "🍃 应用净化"', '    type: select', '    proxies:', '      - REJECT', '      - DIRECT', '  - name: "🐟 漏网之鱼"', '    type: select', '    proxies:', 处理值选择值(名称列表584), ''];
+
+  // 规则源 - CDN: jsDelivr
+  const 值基础576 = 解码64('aHR0cHM6Ly9mYXN0bHkuanNkZWxpdnIubmV0L2doL0xveWFsc29sZGllci9jbGFzaC1ydWxlc0ByZWxlYXNl');
+  const 提供器 = (名称575, 本地值574) => [`  ${名称575}:`, `    type: http`, `    behavior: ${本地值574}`, `    url: "${值基础576}/${名称575}.txt"`, `    path: ./rulesets/loyalsoldier/${名称575}.txt`, `    interval: 86400`].join('\n');
+  const 规则值 = ['rule-providers:', 提供器('reject', 'domain'), 提供器('icloud', 'domain'), 提供器('apple', 'domain'), 提供器('google', 'domain'), 提供器(解码64('cHJveHk='), 'domain'), 提供器('direct', 'domain'), 提供器('private', 'domain'), 提供器('gfw', 'domain'), 提供器('greatfire', 'domain'), 提供器('tld-not-cn', 'domain'), 提供器('telegramcidr', 'ipcidr'), 提供器('cncidr', 'ipcidr'), 提供器('lancidr', 'ipcidr'), 提供器('applications', 'classical'), ''];
+  const 规则列表 = ['rules:', '  - DOMAIN-SUFFIX,acl4.ssr,🎯 全球直连', '  - DOMAIN-SUFFIX,local,🎯 全球直连', 解码64('ICAtIERPTUFJTixjbGFzaC5yYXpvcmQudG9wLPCfjq8g5YWo55CD55u06L+e'), '  - DOMAIN,yacd.haishan.me,🎯 全球直连', '  - DOMAIN,yacd.metacubex.one,🎯 全球直连', '  - DOMAIN,d.metacubex.one,🎯 全球直连', '  - DOMAIN-SUFFIX,googleapis.cn,🌐 谷歌服务', '  - DOMAIN-SUFFIX,gstatic.com,🌐 谷歌服务', '  - DOMAIN-SUFFIX,xn--ngstr-lra8j.com,🌐 谷歌服务', '  - DOMAIN-SUFFIX,googlevideo.com,📹 油管视频', '  - DOMAIN-SUFFIX,googleusercontent.com,🌐 谷歌服务', '  - DOMAIN-KEYWORD,youtube,📹 油管视频', '  - DOMAIN-SUFFIX,youtube.com,📹 油管视频', '  - DOMAIN-SUFFIX,youtu.be,📹 油管视频', '  - DOMAIN-KEYWORD,netflix,🎬 奈飞视频', '  - DOMAIN-SUFFIX,nflxext.com,🎬 奈飞视频', '  - DOMAIN-SUFFIX,nflxso.net,🎬 奈飞视频', '  - DOMAIN-SUFFIX,nflxvideo.net,🎬 奈飞视频', '  - DOMAIN-SUFFIX,nflximg.com,🎬 奈飞视频', '  - DOMAIN-SUFFIX,nflximg.net,🎬 奈飞视频', '  - DOMAIN-SUFFIX,netflix.com,🎬 奈飞视频', '  - DOMAIN-SUFFIX,netflix.net,🎬 奈飞视频', '  - DOMAIN-SUFFIX,bilibili.com,📺 哔哩哔哩', '  - DOMAIN-SUFFIX,bilivideo.com,📺 哔哩哔哩', '  - DOMAIN-SUFFIX,hdslb.com,📺 哔哩哔哩', '  - DOMAIN-KEYWORD,openai,🤖 OpenAI', '  - DOMAIN-KEYWORD,chatgpt,🤖 OpenAI', '  - DOMAIN-SUFFIX,openai.com,🤖 OpenAI', '  - DOMAIN-SUFFIX,chatgpt.com,🤖 OpenAI', '  - DOMAIN-SUFFIX,oaistatic.com,🤖 OpenAI', '  - DOMAIN-SUFFIX,oaiusercontent.com,🤖 OpenAI', '  - DOMAIN-SUFFIX,anthropic.com,🤖 OpenAI', '  - DOMAIN-SUFFIX,claude.ai,🤖 OpenAI', '  - DOMAIN-SUFFIX,perplexity.ai,🤖 OpenAI', '  - DOMAIN-SUFFIX,gemini.google.com,🤖 OpenAI', '  - RULE-SET,applications,🎯 全球直连', '  - RULE-SET,private,🎯 全球直连', '  - RULE-SET,reject,🛑 全球拦截', '  - RULE-SET,icloud,🍎 苹果服务', '  - RULE-SET,apple,🍎 苹果服务', '  - RULE-SET,google,🌐 谷歌服务', 解码64('ICAtIFJVTEUtU0VULHByb3h5LPCfmoAg6IqC54K56YCJ5oup'), '  - RULE-SET,gfw,🚀 节点选择', '  - RULE-SET,greatfire,🚀 节点选择', '  - RULE-SET,tld-not-cn,🚀 节点选择', '  - RULE-SET,direct,🎯 全球直连', '  - RULE-SET,lancidr,🎯 全球直连,no-resolve', '  - RULE-SET,cncidr,🎯 全球直连,no-resolve', '  - RULE-SET,telegramcidr,📲 电报信息,no-resolve', '  - GEOIP,LAN,🎯 全球直连,no-resolve', '  - GEOIP,CN,🎯 全球直连,no-resolve', '  - MATCH,🐟 漏网之鱼'];
+  return [头部581.join('\n'), 值值580.join('\n'), '', 值值577.join('\n'), 规则值.join('\n'), 规则列表.join('\n'), ''].join('\n');
+}
+
+// 内部生成 JSON 客户端配置（完整规则集：远端镜像）
+// 新版内核要把 DNS 地址拆成 type + server + path，这里按 URL 协议归一
+function 拆域名系统地址(地址) {
+  const 文本 = String(地址 || '').trim();
+  try {
+    const 网址 = new URL(文本);
+    const 协议 = 网址.protocol.replace(':', '').toLowerCase();
+    if (协议 === 'https' || 协议 === 'http3' || 协议 === 'h3') {
+      const 输出 = { type: 'https', server: 网址.hostname };
+      if (网址.port) 输出.server_port = Number(网址.port);
+      if (网址.pathname && 网址.pathname !== '/' && 网址.pathname !== '/dns-query') 输出.path = 网址.pathname;
+      return 输出;
+    }
+    if (协议 === 'tls') return { type: 'tls', server: 网址.hostname };
+    if (协议 === 'quic') return { type: 'quic', server: 网址.hostname };
+    if (协议 === 'udp' || 协议 === 'dns') return { type: 'udp', server: 网址.hostname };
+  } catch (错误) {}
+  return { type: 'udp', server: 文本.replace(/^[a-z0-9]+:\/\//i, '').split('/')[0] || '223.5.5.5' };
+}
+
+function 生成值值数据对象(链接列表573) {
+  const 节点列表572 = 链接列表573.map(解析值链接).filter(数量值571 => 数量值571 && (数量值571.proto === 解码64('dmxlc3M=') || 数量值571.proto === 解码64('dHJvamFu')));
+  const 域名系统值570 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+  const 出站值 = 节点列表572.map(数量值569 => 数量值569.name);
+  function 处理节点值出站(数量值568) {
+    const 输出567 = {
+      type: 数量值568.proto,
+      tag: 数量值568.name,
+      server: 规范化值主机(数量值568.server),
+      server_port: 数量值568.port
+    };
+    if (数量值568.proto === 解码64('dmxlc3M=')) {
+      输出567.uuid = 数量值568.uuid;
+      if (数量值568.flow) 输出567.flow = 数量值568.flow;
+    } else {
+      输出567.password = 数量值568.password;
+    }
+    if (数量值568.tls) {
+      输出567.tls = {
+        enabled: true,
+        server_name: 数量值568.sni,
+        insecure: false,
+        utls: {
+          enabled: true,
+          fingerprint: 数量值568.fp || 'chrome'
+        }
+      };
+      if (数量值568.alpn && 数量值568.alpn.length) 输出567.tls.alpn = 数量值568.alpn;
+      if (数量值568.ech) {
+        输出567.tls.ech = {
+          enabled: true,
+          pq_signature_schemes_enabled: false,
+          dynamic_record_sizing_disabled: false
+        };
+      }
+    }
+    if (数量值568.network === 'ws' || 数量值568.network === 'xhttp') {
+      输出567.transport = {
+        type: 'ws',
+        path: 数量值568.path,
+        headers: {
+          Host: 数量值568.host
+        },
+        max_early_data: 2048,
+        early_data_header_name: 'Sec-WebSocket-Protocol'
+      };
+    } else if (数量值568.network === 'grpc') {
+      输出567.transport = {
+        type: 'grpc',
+        service_name: 数量值568.path
+      };
+    }
+    return 输出567;
+  }
+
+  // 远端 SRS 文件（CDN：jsDelivr 镜像）
+  const 值基础值 = 'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite';
+  const 值基础地址 = 'https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geoip';
+  const 值规则566 = 本地值565 => ({
+    tag: `geosite-${本地值565}`,
+    type: 'remote',
+    format: 'binary',
+    url: `${值基础值}/${本地值565}.srs`,
+    download_detour: 'direct'
+  });
+  const 地址规则 = 本地值564 => ({
+    tag: `geoip-${本地值564}`,
+    type: 'remote',
+    format: 'binary',
+    url: `${值基础地址}/${本地值564}.srs`,
+    download_detour: 'direct'
+  });
+  const 配置 = {
+    log: {
+      level: 'info',
+      timestamp: true
+    },
+    dns: {
+      // 新版内核 1.12 起 DNS 服务器改成按 type 写，旧的 address 字符串写法 1.14 已经删掉了
+      servers: [{
+        ...拆域名系统地址(域名系统值570),
+        tag: 'remote',
+        detour: 'select'
+      }, {
+        type: 'udp',
+        tag: 'local',
+        server: '223.5.5.5',
+        detour: 'direct'
+      }, {
+        type: 'fakeip',
+        tag: 'fakeip',
+        inet4_range: '198.18.0.0/15',
+        inet6_range: 'fc00::/18'
+      }],
+      // 拦广告不再靠 rcode://success 的假服务器，直接用 action: reject
+      rules: [{
+        rule_set: 'geosite-category-ads-all',
+        action: 'reject'
+      }, {
+        rule_set: 'geosite-cn',
+        server: 'local'
+      }, {
+        query_type: ['A', 'AAAA'],
+        server: 'fakeip'
+      }],
+      strategy: 'ipv4_only'
+    },
+    inbounds: [{
+      type: 'mixed',
+      tag: 'mixed-in',
+      listen: '127.0.0.1',
+      listen_port: 2080
+    }, {
+      type: 'tun',
+      tag: 'tun-in',
+      interface_name: 解码64('c2luZy1ib3g='),
+      address: ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+      mtu: 9000,
+      auto_route: true,
+      strict_route: true,
+      stack: 'mixed'
+    }],
+    outbounds: [{
+      type: 'selector',
+      tag: 'select',
+      outbounds: ['direct', ...出站值],
+      default: 出站值[0] || 'direct'
+    }, {
+      type: 'selector',
+      tag: '🌍 国外媒体',
+      outbounds: ['select', 'direct', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '📲 电报信息',
+      outbounds: ['select', 'direct', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '🌐 谷歌服务',
+      outbounds: ['select', 'direct', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '🤖 OpenAI',
+      outbounds: ['select', 'direct', ...出站值]
+    }, {
+      type: 'selector',
+      tag: 'Ⓜ️ 微软服务',
+      outbounds: ['direct', 'select', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '🍎 苹果服务',
+      outbounds: ['direct', 'select', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '📺 哔哩哔哩',
+      outbounds: ['direct', 'select', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '📹 油管视频',
+      outbounds: ['select', '🌍 国外媒体', 'direct', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '🎬 奈飞视频',
+      outbounds: ['select', '🌍 国外媒体', 'direct', ...出站值]
+    }, {
+      type: 'selector',
+      tag: '🎯 全球直连',
+      outbounds: ['direct']
+    }, {
+      type: 'selector',
+      tag: '🐟 漏网之鱼',
+      outbounds: ['select', 'direct', ...出站值]
+    }, ...节点列表572.map(处理节点值出站), {
+      type: 'direct',
+      tag: 'direct'
+    }],
+    route: {
+      rule_set: [值规则566('cn'), 值规则566('private'), 值规则566('apple'), 值规则566('apple-cn'), 值规则566('microsoft'), 值规则566('microsoft@cn'), 值规则566('google'), 值规则566('telegram'), 值规则566('openai'), 值规则566('anthropic'), 值规则566('youtube'), 值规则566('netflix'), 值规则566('disney'), 值规则566('spotify'), 值规则566('tiktok'), 值规则566('twitter'), 值规则566('facebook'), 值规则566('github'), 值规则566('geolocation-!cn'), 值规则566('category-ads-all'), 地址规则('cn'), 地址规则('private'), 地址规则('telegram')],
+      rules: [{
+        action: 'sniff'
+      }, {
+        protocol: 'dns',
+        action: 'hijack-dns'
+      }, {
+        ip_is_private: true,
+        outbound: 'direct'
+      }, {
+        rule_set: 'geosite-category-ads-all',
+        action: 'reject'
+      }, {
+        rule_set: 'geosite-private',
+        outbound: 'direct'
+      }, {
+        rule_set: 'geosite-apple-cn',
+        outbound: 'direct'
+      }, {
+        rule_set: 'geosite-microsoft@cn',
+        outbound: 'direct'
+      }, {
+        rule_set: 'geosite-apple',
+        outbound: '🍎 苹果服务'
+      }, {
+        rule_set: 'geosite-microsoft',
+        outbound: 'Ⓜ️ 微软服务'
+      }, {
+        rule_set: 'geosite-openai',
+        outbound: '🤖 OpenAI'
+      }, {
+        rule_set: 'geosite-anthropic',
+        outbound: '🤖 OpenAI'
+      }, {
+        rule_set: 'geosite-telegram',
+        outbound: '📲 电报信息'
+      }, {
+        rule_set: 'geoip-telegram',
+        outbound: '📲 电报信息'
+      }, {
+        rule_set: 'geosite-google',
+        outbound: '🌐 谷歌服务'
+      }, {
+        rule_set: 'geosite-youtube',
+        outbound: '🌍 国外媒体'
+      }, {
+        rule_set: 'geosite-netflix',
+        outbound: '🌍 国外媒体'
+      }, {
+        rule_set: 'geosite-disney',
+        outbound: '🌍 国外媒体'
+      }, {
+        rule_set: 'geosite-spotify',
+        outbound: '🌍 国外媒体'
+      }, {
+        rule_set: 'geosite-tiktok',
+        outbound: '🌍 国外媒体'
+      }, {
+        rule_set: 'geosite-twitter',
+        outbound: '🌍 国外媒体'
+      }, {
+        rule_set: 'geosite-facebook',
+        outbound: '🌍 国外媒体'
+      }, {
+        rule_set: 'geosite-github',
+        outbound: 'select'
+      }, {
+        rule_set: 'geosite-geolocation-!cn',
+        outbound: 'select'
+      }, {
+        rule_set: 'geosite-cn',
+        outbound: 'direct'
+      }, {
+        rule_set: 'geoip-cn',
+        outbound: 'direct'
+      }, {
+        ip_is_private: true,
+        outbound: 'direct'
+      }],
+      final: '🐟 漏网之鱼',
+      // 1.12 起出站解析域名必须显式指定用哪个 DNS，不写 1.14 会直接拒绝启动
+      default_domain_resolver: {
+        server: 'local'
+      },
+      auto_detect_interface: true
+    },
+    experimental: {
+      cache_file: {
+        enabled: true,
+        store_fakeip: true
+      },
+      clash_api: {
+        external_controller: '127.0.0.1:9090'
+      }
+    }
+  };
+  return JSON.stringify(配置, null, 2);
+}
+
+// 规则源（CDN：jsDelivr 镜像 GitHub）
+const 值基础 = 解码64('aHR0cHM6Ly9mYXN0bHkuanNkZWxpdnIubmV0L2doL0FDTDRTU1IvQUNMNFNTUkBtYXN0ZXIvQ2xhc2g=');
+const 值规则 = 名称563 => `${值基础}/${名称563}.list`;
+
+// 内部生成 ini 客户端配置（完整规则集）
+function 生成值值562(链接列表561) {
+  const 节点列表560 = 链接列表561.map(解析值链接).filter(数量值559 => 数量值559 && 数量值559.proto === 解码64('dHJvamFu'));
+  const 域名系统值558 = 自定义域名系统 || '223.5.5.5';
+  const 名称列表557 = 节点列表560.map(数量值556 => 数量值556.name);
+  const 行列表555 = ['[General]', 'loglevel = notify', 'internet-test-url = http://www.apple.com/library/test/success.html', 解码64('cHJveHktdGVzdC11cmwgPSBodHRwOi8vd3d3LmdzdGF0aWMuY29tL2dlbmVyYXRlXzIwNA=='), 'test-timeout = 3', `dns-server = ${域名系统值558.replace(/^https?:\/\//, '').replace(/\/.*$/, '')}, 119.29.29.29, system`, 'encrypted-dns-server = https://223.5.5.5/dns-query, https://1.12.12.12/dns-query', 'ipv6 = true', 'allow-wifi-access = false', 'wifi-access-http-port = 6152', 解码64('d2lmaS1hY2Nlc3Mtc29ja3M1LXBvcnQgPSA2MTUz'), 解码64('c2tpcC1wcm94eSA9IDEyNy4wLjAuMSwgMTkyLjE2OC4wLjAvMTYsIDEwLjAuMC4wLzgsIDE3Mi4xNi4wLjAvMTIsIGxvY2FsaG9zdCwgKi5sb2NhbCwgY2FwdGl2ZS5hcHBsZS5jb20='), 'exclude-simple-hostnames = true', 'show-error-page-for-reject = true', '', 解码64('W1Byb3h5XQ==')];
+  for (const 数量值554 of 节点列表560) {
+    const 服务名称指示 = 数量值554.sni;
+    行列表555.push(`${数量值554.name} = ${解码64('dHJvamFu')}, ${数量值554.server}, ${数量值554.port}, password=${数量值554.password}, sni=${服务名称指示}, ws=true, ws-path=${数量值554.path}, ws-headers=Host:${数量值554.host}, skip-cert-verify=false, tfo=true`);
+  }
+  if (!节点列表560.length) {
+    行列表555.push('Direct = direct');
+  }
+  行列表555.push('');
+  行列表555.push(解码64('W1Byb3h5IEdyb3VwXQ=='));
+  const 列表553 = 名称列表557.length ? 名称列表557.join(', ') : 'DIRECT';
+  行列表555.push(`🚀 节点选择 = select, 🎯 全球直连, ${列表553}`);
+  行列表555.push(`🌍 国外媒体 = select, ${处理值值列表(名称列表557)}`);
+  行列表555.push(`📺 哔哩哔哩 = select, ${处理值值列表(名称列表557, {
+    directFirst: true
+  })}`);
+  行列表555.push(`📹 油管视频 = select, ${处理值值列表(名称列表557, {
+    extraGroups: ['🌍 国外媒体']
+  })}`);
+  行列表555.push(`🎬 奈飞视频 = select, ${处理值值列表(名称列表557, {
+    extraGroups: ['🌍 国外媒体']
+  })}`);
+  行列表555.push(`📲 电报信息 = select, ${处理值值列表(名称列表557)}`);
+  行列表555.push(`🌐 谷歌服务 = select, ${处理值值列表(名称列表557)}`);
+  行列表555.push(`🤖 OpenAI = select, ${处理值值列表(名称列表557)}`);
+  行列表555.push(`Ⓜ️ 微软服务 = select, ${处理值值列表(名称列表557, {
+    directFirst: true
+  })}`);
+  行列表555.push(`🍎 苹果服务 = select, ${处理值值列表(名称列表557, {
+    directFirst: true
+  })}`);
+  行列表555.push(`🎯 全球直连 = select, DIRECT`);
+  行列表555.push(`🛑 全球拦截 = select, REJECT, DIRECT`);
+  行列表555.push(`🐟 漏网之鱼 = select, ${处理值值列表(名称列表557)}`);
+  行列表555.push('');
+  行列表555.push('[Rule]');
+  行列表555.push(`RULE-SET,${值规则('LocalAreaNetwork')},🎯 全球直连`);
+  行列表555.push(`RULE-SET,${值规则('UnBan')},🎯 全球直连`);
+  行列表555.push(`RULE-SET,${值规则('BanAD')},🛑 全球拦截`);
+  行列表555.push(`RULE-SET,${值规则('BanProgramAD')},🛑 全球拦截`);
+  行列表555.push(`RULE-SET,${值规则('GoogleFCM')},🌐 谷歌服务`);
+  行列表555.push(`RULE-SET,${值规则('GoogleCN')},🎯 全球直连`);
+  行列表555.push(`RULE-SET,${值规则('SteamCN')},🎯 全球直连`);
+  行列表555.push(`RULE-SET,${值规则('Microsoft')},Ⓜ️ 微软服务`);
+  行列表555.push(`RULE-SET,${值规则('Apple')},🍎 苹果服务`);
+  行列表555.push(`RULE-SET,${值规则('Telegram')},📲 电报信息`);
+  行列表555.push(`RULE-SET,${值规则('OpenAi')},🤖 OpenAI`);
+  行列表555.push(`RULE-SET,${值规则('Claude')},🤖 OpenAI`);
+  行列表555.push(`RULE-SET,${值规则('Copilot')},🤖 OpenAI`);
+  行列表555.push(`RULE-SET,${值规则('Netflix')},🌍 国外媒体`);
+  行列表555.push(`RULE-SET,${值规则('YouTube')},🌍 国外媒体`);
+  行列表555.push(`RULE-SET,${值规则('Disney')},🌍 国外媒体`);
+  行列表555.push(`RULE-SET,${值规则('Spotify')},🌍 国外媒体`);
+  行列表555.push(`RULE-SET,${值规则('TikTok')},🌍 国外媒体`);
+  行列表555.push(`RULE-SET,${值规则('BiliBili')},📺 哔哩哔哩`);
+  行列表555.push(`RULE-SET,${值规则(解码64('UHJveHlNZWRpYQ=='))},🌍 国外媒体`);
+  行列表555.push(`RULE-SET,${值规则(解码64('UHJveHlHRldsaXN0'))},🚀 节点选择`);
+  行列表555.push(`RULE-SET,${值规则('ChinaDomain')},🎯 全球直连`);
+  行列表555.push(`RULE-SET,${值规则('ChinaCompanyIp')},🎯 全球直连`);
+  行列表555.push(`RULE-SET,${值规则('ChinaIp')},🎯 全球直连`);
+  行列表555.push('GEOIP,CN,🎯 全球直连');
+  行列表555.push('FINAL,🐟 漏网之鱼,dns-failed');
+  return 行列表555.join('\n');
+}
+
+// 内部生成另一类 ini 客户端配置
+function 生成值值552(链接列表551) {
+  const 节点列表550 = 链接列表551.map(解析值链接).filter(数量值549 => 数量值549 && (数量值549.proto === 解码64('dmxlc3M=') || 数量值549.proto === 解码64('dHJvamFu')));
+  const 名称列表548 = 节点列表550.map(数量值547 => 数量值547.name);
+  const 行列表546 = ['[General]', 'ip-mode = dual', `dns-server = ${(自定义域名系统 || '223.5.5.5').replace(/^https?:\/\//, '').replace(/\/.*$/, '')},119.29.29.29,system`, 'doh-server = https://223.5.5.5/dns-query, https://1.12.12.12/dns-query', 解码64('YWxsb3ctdWRwLXByb3h5ID0gdHJ1ZQ=='), 'allow-wifi-access = false', 'sni-sniffing = true', 解码64('c2tpcC1wcm94eSA9IDEyNy4wLjAuMSwxOTIuMTY4LjAuMC8xNiwxMC4wLjAuMC84LDE3Mi4xNi4wLjAvMTIsbG9jYWxob3N0LCoubG9jYWwsY2FwdGl2ZS5hcHBsZS5jb20='), 'bypass-tun = 10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.0.2.0/24,192.88.99.0/24,192.168.0.0/16,198.51.100.0/24,203.0.113.0/24,224.0.0.0/4,255.255.255.255/32', '', 解码64('W1Byb3h5XQ==')];
+  for (const 数量值545 of 节点列表550) {
+    if (数量值545.proto === 解码64('dmxlc3M=')) {
+      const 部分列表544 = [`${数量值545.server}`, `${数量值545.port}`, `udp=true`, `username=${数量值545.uuid}`, `transport=ws`, `path=${数量值545.path}`, `host=${数量值545.host}`, `over-tls=${数量值545.tls ? 'true' : 'false'}`];
+      if (数量值545.tls) {
+        部分列表544.push(`tls-name=${数量值545.sni}`);
+        if (数量值545.alpn && 数量值545.alpn.length) 部分列表544.push(`alpn=${数量值545.alpn.join(':')}`);
+        部分列表544.push(`skip-cert-verify=false`);
+      }
+      行列表546.push(`${数量值545.name} = ${解码64('dmxlc3M=')},${部分列表544.join(',')}`);
+    } else {
+      const 部分列表543 = [`${数量值545.server}`, `${数量值545.port}`, `password=${数量值545.password}`, `transport=ws`, `path=${数量值545.path}`, `host=${数量值545.host}`, `over-tls=true`, `tls-name=${数量值545.sni}`];
+      if (数量值545.alpn && 数量值545.alpn.length) 部分列表543.push(`alpn=${数量值545.alpn.join(':')}`);
+      部分列表543.push(`skip-cert-verify=false`);
+      行列表546.push(`${数量值545.name} = ${解码64('dHJvamFu')},${部分列表543.join(',')}`);
+    }
+  }
+  行列表546.push('');
+  行列表546.push(解码64('W1Byb3h5IEdyb3VwXQ=='));
+  const 列表542 = 名称列表548.length ? 名称列表548.join(',') : 'DIRECT';
+  行列表546.push(`🚀 节点选择 = select,🎯 全球直连,${列表542}`);
+  行列表546.push(`🌍 国外媒体 = select,${处理值值列表(名称列表548, {
+    compact: true
+  })}`);
+  行列表546.push(`📺 哔哩哔哩 = select,${处理值值列表(名称列表548, {
+    directFirst: true,
+    compact: true
+  })}`);
+  行列表546.push(`📹 油管视频 = select,${处理值值列表(名称列表548, {
+    extraGroups: ['🌍 国外媒体'],
+    compact: true
+  })}`);
+  行列表546.push(`🎬 奈飞视频 = select,${处理值值列表(名称列表548, {
+    extraGroups: ['🌍 国外媒体'],
+    compact: true
+  })}`);
+  行列表546.push(`📲 电报信息 = select,${处理值值列表(名称列表548, {
+    compact: true
+  })}`);
+  行列表546.push(`🌐 谷歌服务 = select,${处理值值列表(名称列表548, {
+    compact: true
+  })}`);
+  行列表546.push(`🤖 OpenAI = select,${处理值值列表(名称列表548, {
+    compact: true
+  })}`);
+  行列表546.push(`Ⓜ️ 微软服务 = select,${处理值值列表(名称列表548, {
+    directFirst: true,
+    compact: true
+  })}`);
+  行列表546.push(`🍎 苹果服务 = select,${处理值值列表(名称列表548, {
+    directFirst: true,
+    compact: true
+  })}`);
+  行列表546.push(`🎯 全球直连 = select,DIRECT`);
+  行列表546.push(`🛑 全球拦截 = select,REJECT,DIRECT`);
+  行列表546.push(`🐟 漏网之鱼 = select,${处理值值列表(名称列表548, {
+    compact: true
+  })}`);
+  行列表546.push('');
+  行列表546.push('[Remote Rule]');
+  行列表546.push(`${值规则('LocalAreaNetwork')}, policy=🎯 全球直连, tag=局域网, enabled=true`);
+  行列表546.push(`${值规则('BanAD')}, policy=🛑 全球拦截, tag=广告拦截, enabled=true`);
+  行列表546.push(`${值规则('BanProgramAD')}, policy=🛑 全球拦截, tag=应用广告, enabled=true`);
+  行列表546.push(`${值规则('GoogleCN')}, policy=🎯 全球直连, tag=GoogleCN, enabled=true`);
+  行列表546.push(`${值规则('SteamCN')}, policy=🎯 全球直连, tag=SteamCN, enabled=true`);
+  行列表546.push(`${值规则('Microsoft')}, policy=Ⓜ️ 微软服务, tag=微软, enabled=true`);
+  行列表546.push(`${值规则('Apple')}, policy=🍎 苹果服务, tag=苹果, enabled=true`);
+  行列表546.push(`${值规则('Telegram')}, policy=📲 电报信息, tag=电报, enabled=true`);
+  行列表546.push(`${值规则('OpenAi')}, policy=🤖 OpenAI, tag=OpenAI, enabled=true`);
+  行列表546.push(`${值规则('Netflix')}, policy=🌍 国外媒体, tag=Netflix, enabled=true`);
+  行列表546.push(`${值规则('YouTube')}, policy=🌍 国外媒体, tag=YouTube, enabled=true`);
+  行列表546.push(`${值规则('Disney')}, policy=🌍 国外媒体, tag=Disney, enabled=true`);
+  行列表546.push(`${值规则('Spotify')}, policy=🌍 国外媒体, tag=Spotify, enabled=true`);
+  行列表546.push(`${值规则('TikTok')}, policy=🌍 国外媒体, tag=TikTok, enabled=true`);
+  行列表546.push(`${值规则('BiliBili')}, policy=📺 哔哩哔哩, tag=哔哩哔哩, enabled=true`);
+  行列表546.push(`${值规则(解码64('UHJveHlNZWRpYQ=='))}, policy=🌍 国外媒体, tag=${解码64('5Luj55CG5aqS5L2T')}, enabled=true`);
+  行列表546.push(`${值规则(解码64('UHJveHlHRldsaXN0'))}, policy=🚀 节点选择, tag=${解码64('5Luj55CG5YiX6KGo')}, enabled=true`);
+  行列表546.push(`${值规则('ChinaDomain')}, policy=🎯 全球直连, tag=中国域名, enabled=true`);
+  行列表546.push(`${值规则('ChinaIp')}, policy=🎯 全球直连, tag=中国IP, enabled=true`);
+  行列表546.push('');
+  行列表546.push('[Rule]');
+  行列表546.push('GEOIP,CN,🎯 全球直连');
+  行列表546.push('FINAL,🐟 漏网之鱼');
+  return 行列表546.join('\n');
+}
+
+// 内部生成圈叉配置（完整远端 filter 资源）
+function 生成值值(链接列表541) {
+  const 节点列表 = 链接列表541.map(解析值链接).filter(数量值540 => 数量值540 && (数量值540.proto === 解码64('dmxlc3M=') || 数量值540.proto === 解码64('dHJvamFu')));
+  const 名称列表 = 节点列表.map(数量值539 => 数量值539.name);
+  const 圈叉基础配置 = 解码64('aHR0cHM6Ly9mYXN0bHkuanNkZWxpdnIubmV0L2doL2JsYWNrbWF0cml4Ny9pb3NfcnVsZV9zY3JpcHRAbWFzdGVyL3J1bGUvUXVhbnR1bXVsdFg=');
+  const 行列表538 = ['[general]', 'network_check_url=http://www.gstatic.com/generate_204', 'server_check_url=http://www.gstatic.com/generate_204', 'profile_img_url=https://fastly.jsdelivr.net/gh/byJoey/cfnew@main/snippets/logo.png', 'dns_exclusion_list=*.cmpassport.com, *.jegotrip.com.cn, *.icloud.com, *.icloud.com.cn, *.apple.com, *.weibo.com, *.qq.com', 'running_mode_trigger=filter', '', '[dns]', `server=${(自定义域名系统 || '223.5.5.5').replace(/^https?:\/\//, '').replace(/\/.*$/, '')}`, 'server=119.29.29.29', 'server=https://223.5.5.5/dns-query', 'server=https://1.12.12.12/dns-query', '', '[server_local]'];
+  for (const 数量值537 of 节点列表) {
+    if (数量值537.proto === 解码64('dmxlc3M=')) {
+      const 部分列表536 = [`${数量值537.server}:${数量值537.port}`, `method=none`, `password=${数量值537.uuid}`, `obfs=${数量值537.tls ? 'wss' : 'ws'}`, `obfs-host=${数量值537.host}`, `obfs-uri=${数量值537.path}`];
+      if (数量值537.tls) 部分列表536.push(`tls-verification=true`, `tls13=true`);
+      部分列表536.push(`tag=${数量值537.name}`);
+      行列表538.push(`${解码64('dmxlc3M=')}=${部分列表536.join(', ')}`);
+    } else {
+      const 部分列表535 = [`${数量值537.server}:${数量值537.port}`, `password=${数量值537.password}`, `over-tls=true`, `tls-host=${数量值537.sni}`, `obfs=wss`, `obfs-host=${数量值537.host}`, `obfs-uri=${数量值537.path}`, `tls-verification=true`, `tag=${数量值537.name}`];
+      行列表538.push(`${解码64('dHJvamFu')}=${部分列表535.join(', ')}`);
+    }
+  }
+  行列表538.push('');
+  行列表538.push('[policy]');
+  const 列表534 = 名称列表.length ? 名称列表.join(', ') : 'direct';
+  行列表538.push(`static=🚀 节点选择, ${列表534}, direct, img-url=${解码64('aHR0cHM6Ly9mYXN0bHkuanNkZWxpdnIubmV0L2doL0tvb2xzb24vUXVyZUBtYXN0ZXIvSWNvblNldC9Db2xvci9Qcm94eS5wbmc=')}`);
+  行列表538.push(`static=🌍 国外媒体, ${处理值值列表(名称列表)}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/ForeignMedia.png`);
+  行列表538.push(`static=📺 哔哩哔哩, ${处理值值列表(名称列表, {
+    directFirst: true
+  })}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/bilibili.png`);
+  行列表538.push(`static=📹 油管视频, ${处理值值列表(名称列表, {
+    extraGroups: ['🌍 国外媒体']
+  })}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/YouTube.png`);
+  行列表538.push(`static=🎬 奈飞视频, ${处理值值列表(名称列表, {
+    extraGroups: ['🌍 国外媒体']
+  })}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Netflix.png`);
+  行列表538.push(`static=📲 电报信息, ${处理值值列表(名称列表)}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Telegram.png`);
+  行列表538.push(`static=🌐 谷歌服务, ${处理值值列表(名称列表)}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Google.png`);
+  行列表538.push(`static=🤖 OpenAI, ${处理值值列表(名称列表)}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/ChatGPT.png`);
+  行列表538.push(`static=Ⓜ️ 微软服务, ${处理值值列表(名称列表, {
+    directFirst: true
+  })}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Microsoft.png`);
+  行列表538.push(`static=🍎 苹果服务, ${处理值值列表(名称列表, {
+    directFirst: true
+  })}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Apple.png`);
+  行列表538.push(`static=🎯 全球直连, direct, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Direct.png`);
+  行列表538.push(`static=🛑 全球拦截, reject, direct, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Advertising.png`);
+  行列表538.push(`static=🐟 漏网之鱼, ${处理值值列表(名称列表)}, img-url=https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Final.png`);
+  行列表538.push('');
+  行列表538.push('[filter_remote]');
+  行列表538.push(`${圈叉基础配置}/Lan/Lan.list, tag=局域网, force-policy=🎯 全球直连, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Advertising/Advertising.list, tag=广告拦截, force-policy=🛑 全球拦截, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Microsoft/Microsoft.list, tag=微软, force-policy=Ⓜ️ 微软服务, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Apple/Apple.list, tag=苹果, force-policy=🍎 苹果服务, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Telegram/Telegram.list, tag=电报, force-policy=📲 电报信息, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Google/Google.list, tag=谷歌, force-policy=🌐 谷歌服务, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/OpenAI/OpenAI.list, tag=OpenAI, force-policy=🤖 OpenAI, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Claude/Claude.list, tag=Claude, force-policy=🤖 OpenAI, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/YouTube/YouTube.list, tag=YouTube, force-policy=🌍 国外媒体, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Netflix/Netflix.list, tag=Netflix, force-policy=🌍 国外媒体, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Disney/Disney.list, tag=Disney, force-policy=🌍 国外媒体, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Spotify/Spotify.list, tag=Spotify, force-policy=🌍 国外媒体, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/TikTok/TikTok.list, tag=TikTok, force-policy=🌍 国外媒体, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/BiliBili/BiliBili.list, tag=哔哩哔哩, force-policy=📺 哔哩哔哩, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/Global/Global.list, tag=全球加速, force-policy=🚀 节点选择, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push(`${圈叉基础配置}/ChinaMax/ChinaMax.list, tag=中国直连, force-policy=🎯 全球直连, update-interval=86400, opt-parser=false, enabled=true`);
+  行列表538.push('');
+  行列表538.push('[filter_local]');
+  行列表538.push('geoip, cn, 🎯 全球直连');
+  行列表538.push('final, 🐟 漏网之鱼');
+  return 行列表538.join('\n');
+}
+
+// 兼容旧调用名
+async function 生成值配置533(链接列表532) {
+  return 生成值值589(链接列表532);
+}
+function 生成值配置531(链接列表530) {
+  return 生成值值562(链接列表530);
+}
+function 生成值配置529(链接列表528) {
+  return 生成值值552(链接列表528);
+}
+function 生成值值配置527(链接列表526) {
+  return 生成值值(链接列表526);
+}
+function 生成值值配置(链接列表525) {
+  return 生成值值数据对象(链接列表525);
+}
+function 生成值配置(链接列表524) {
+  return btoa(链接列表524.join('\n'));
+}
+function 生成值2值配置(链接列表523) {
+  return btoa(链接列表523.join('\n'));
+}
+
+// 全局变量存储ECH调试信息
+let 加密客户端问候调试值 = '';
+async function 获取加密客户端问候配置(域名522) {
+  if (!启用加密客户端问候) {
+    加密客户端问候调试值 = 'ECH功能已禁用';
+    return null;
+  }
+  加密客户端问候调试值 = '';
+  const 调试步骤 = [];
+  try {
+    // 优先使用 Google DNS 查询 cloudflare-ech.com 的 ECH 配置
+    调试步骤.push('尝试使用 Google DNS 查询 cloudflare-ech.com...');
+    const 加密客户端问候域名网址 = `https://v.recipes/dns/dns.google/dns-query?name=cloudflare-ech.com&type=65`;
+    const 加密客户端问候响应 = await fetch(加密客户端问候域名网址, {
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+    调试步骤.push(`Google DNS 响应状态: ${加密客户端问候响应.status}`);
+    if (加密客户端问候响应.ok) {
+      const 加密客户端问候数据 = await 加密客户端问候响应.json();
+      调试步骤.push(`Google DNS 返回数据: ${JSON.stringify(加密客户端问候数据).substring(0, 200)}...`);
+      if (加密客户端问候数据.Answer && 加密客户端问候数据.Answer.length > 0) {
+        调试步骤.push(`找到 ${加密客户端问候数据.Answer.length} 条答案记录`);
+        for (const 本地值521 of 加密客户端问候数据.Answer) {
+          if (本地值521.data) {
+            调试步骤.push(`解析答案数据: ${typeof 本地值521.data}, 长度: ${String(本地值521.data).length}`);
+            // Google DNS 返回的数据格式可能不同，需要解析
+            const 数据字符串520 = typeof 本地值521.data === 'string' ? 本地值521.data : JSON.stringify(本地值521.data);
+            const 加密客户端问候值519 = 数据字符串520.match(/ech=([^\s"']+)/);
+            if (加密客户端问候值519 && 加密客户端问候值519[1]) {
+              加密客户端问候调试值 = 调试步骤.join('\\n') + '\\n✅ 成功从 Google DNS 获取 ECH 配置';
+              return 加密客户端问候值519[1];
+            }
+            // 如果没有找到，尝试直接使用 data（可能是 base64 编码的）
+            if (本地值521.data && !数据字符串520.includes('ech=')) {
+              try {
+                const 已解码518 = atob(本地值521.data);
+                调试步骤.push(`尝试 base64 解码，解码后长度: ${已解码518.length}`);
+                const 已解码值517 = 已解码518.match(/ech=([^\s"']+)/);
+                if (已解码值517 && 已解码值517[1]) {
+                  加密客户端问候调试值 = 调试步骤.join('\\n') + '\\n✅ 成功从 Google DNS (base64解码) 获取 ECH 配置';
+                  return 已解码值517[1];
+                }
+              } catch (事件值516) {
+                调试步骤.push(`base64 解码失败: ${事件值516.message}`);
+              }
+            }
+          }
+        }
+      } else {
+        调试步骤.push('Google DNS 未返回答案记录');
+      }
+    } else {
+      调试步骤.push(`Google DNS 请求失败: ${加密客户端问候响应.status}`);
+    }
+
+    // 如果 cloudflare-ech.com 查询失败，尝试使用 Google DNS 查询目标域名的 HTTPS 记录
+    调试步骤.push(`尝试使用 Google DNS 查询目标域名 ${域名522}...`);
+    const 加密域名查询网址 = `https://v.recipes/dns/dns.google/dns-query?name=${encodeURIComponent(域名522)}&type=65`;
+    const 响应515 = await fetch(加密域名查询网址, {
+      headers: {
+        'Accept': 'application/json'
+      }
+    });
+    调试步骤.push(`Google DNS (目标域名) 响应状态: ${响应515.status}`);
+    if (响应515.ok) {
+      const 数据514 = await 响应515.json();
+      调试步骤.push(`Google DNS (目标域名) 返回数据: ${JSON.stringify(数据514).substring(0, 200)}...`);
+      if (数据514.Answer && 数据514.Answer.length > 0) {
+        调试步骤.push(`找到 ${数据514.Answer.length} 条答案记录`);
+        for (const 本地值513 of 数据514.Answer) {
+          if (本地值513.data) {
+            const 数据字符串 = typeof 本地值513.data === 'string' ? 本地值513.data : JSON.stringify(本地值513.data);
+            const 加密客户端问候值512 = 数据字符串.match(/ech=([^\s"']+)/);
+            if (加密客户端问候值512 && 加密客户端问候值512[1]) {
+              加密客户端问候调试值 = 调试步骤.join('\\n') + '\\n✅ 成功从 Google DNS (目标域名) 获取 ECH 配置';
+              return 加密客户端问候值512[1];
+            }
+            // 尝试 base64 解码
+            try {
+              const 已解码511 = atob(本地值513.data);
+              const 已解码值 = 已解码511.match(/ech=([^\s"']+)/);
+              if (已解码值 && 已解码值[1]) {
+                加密客户端问候调试值 = 调试步骤.join('\\n') + '\\n✅ 成功从 Google DNS (目标域名, base64解码) 获取 ECH 配置';
+                return 已解码值[1];
+              }
+            } catch (事件值510) {
+              调试步骤.push(`base64 解码失败: ${事件值510.message}`);
+            }
+          }
+        }
+      } else {
+        调试步骤.push('Google DNS (目标域名) 未返回答案记录');
+      }
+    } else {
+      调试步骤.push(`Google DNS (目标域名) 请求失败: ${响应515.status}`);
+    }
+
+    // 如果 Google DNS 失败，尝试使用 Cloudflare DNS 作为备选
+    调试步骤.push('尝试使用 Cloudflare DNS 作为备选...');
+    const 云墙加密客户端问候网址 = `https://cloudflare-dns.com/dns-query?name=cloudflare-ech.com&type=65`;
+    const 云墙响应 = await fetch(云墙加密客户端问候网址, {
+      headers: {
+        'Accept': 'application/dns-json'
+      }
+    });
+    调试步骤.push(`Cloudflare DNS 响应状态: ${云墙响应.status}`);
+    if (云墙响应.ok) {
+      const 云墙数据 = await 云墙响应.json();
+      调试步骤.push(`Cloudflare DNS 返回数据: ${JSON.stringify(云墙数据).substring(0, 200)}...`);
+      if (云墙数据.Answer && 云墙数据.Answer.length > 0) {
+        调试步骤.push(`找到 ${云墙数据.Answer.length} 条答案记录`);
+        for (const 本地值509 of 云墙数据.Answer) {
+          if (本地值509.data) {
+            const 加密客户端问候值 = 本地值509.data.match(/ech=([^\s"']+)/);
+            if (加密客户端问候值 && 加密客户端问候值[1]) {
+              加密客户端问候调试值 = 调试步骤.join('\\n') + '\\n✅ 成功从 Cloudflare DNS 获取 ECH 配置';
+              return 加密客户端问候值[1];
+            }
+          }
+        }
+      } else {
+        调试步骤.push('Cloudflare DNS 未返回答案记录');
+      }
+    } else {
+      调试步骤.push(`Cloudflare DNS 请求失败: ${云墙响应.status}`);
+    }
+    加密客户端问候调试值 = 调试步骤.join('\\n') + '\\n❌ 所有DNS查询均失败，未获取到ECH配置';
+    return null;
+  } catch (错误508) {
+    加密客户端问候调试值 = 调试步骤.join('\\n') + '\\n❌ 获取ECH配置时发生错误: ' + 错误508.message;
+    return null;
+  }
+}
+// ======================= 家宽链式（住宅宽带当落地） =======================
+// 跟之前的套娃一个思路：cfnew 自己的节点在前面带路，落地换成网友共享出来的家庭宽带。
+// 客户端会把落地节点的整条隧道塞进前置节点里走，握手走 CF 边缘，出网是住宅 IP。
+// 内核要 1.19.25 以上才认这类节点，老内核导入会报类型不认识。
+const 家宽节点源 = 解码64('aHR0cHM6Ly93d3cudnBuZ2F0ZS5uZXQvYXBpL2lwaG9uZS8=');
+const 家宽节点类型 = 解码64('b3BlbnZwbg==');
+const 家宽前置字段 = 解码64('ZGlhbGVyLXByb3h5');
+const 家宽机房前缀 = 解码64('cHVibGljLXZwbg==');
+const 家宽机房网段 = '219.100.37.';
+const 家宽缓存期限 = 30 * 60 * 1000;
+let 家宽缓存 = null;
+let 家宽缓存时间 = 0;
+const 家宽指令正则 = {};
+
+function 取家宽指令(配置文本, 指令名) {
+  if (!家宽指令正则[指令名]) 家宽指令正则[指令名] = new RegExp('^[ \\t]*' + 指令名 + '[ \\t]+(.+?)[ \\t]*$', 'm');
+  const 命中 = 配置文本.match(家宽指令正则[指令名]);
+  return 命中 ? 命中[1].trim() : '';
+}
+
+function 取家宽内联块(配置文本, 标签) {
+  const 命中 = 配置文本.match(new RegExp('<' + 标签 + '>([\\s\\S]*?)<\\/' + 标签 + '>'));
+  return 命中 ? 命中[1].trim() : '';
+}
+
+function 缩进证书文本(文本, 空白) {
+  return 文本.split('\n').map(行 => 行.trim()).filter(行 => 行).map(行 => 空白 + 行).join('\n');
+}
+
+// 每条配置解出来约 10KB，但要的几行指令都在前 4KB 里，证书从 4.7KB 往后才开始。
+// 所以只解开头一段，全量 60 多个节点的解析开销能压一半多；开头没找到 remote 再整条解。
+const 家宽前段长度 = 6000;
+function 解家宽配置(配置64, 整条 = false) {
+  const 干净 = 配置64.replace(/\s/g, '');
+  if (整条 || 干净.length <= 家宽前段长度) return 解码64(干净);
+  return 解码64(干净.slice(0, 家宽前段长度));
+}
+
+// 清单里 Operator/Message 两列可能自带逗号，所以只从行首按下标取前几列，
+// 配置固定是最后一列，多出来的逗号不会把解析冲歪。
+function 解析家宽清单(原文) {
+  const 候选 = [];
+  for (const 原始行 of 原文.split('\n')) {
+    const 行 = 原始行.trim();
+    if (!行 || 行.charAt(0) === '*' || 行.charAt(0) === '#') continue;
+    const 字段 = 行.split(',');
+    if (字段.length < 15) continue;
+    // 只要住宅宽带：官方自己架的机房服务器剔掉，而且那批容易满员握手失败
+    if ((字段[0] || '').indexOf(家宽机房前缀) === 0) continue;
+    if ((字段[1] || '').indexOf(家宽机房网段) === 0) continue;
+    const 配置64 = 字段[字段.length - 1];
+    if (!配置64 || 配置64.length < 100) continue;
+    候选.push({ 国家: (字段[6] || '').toUpperCase() || 'XX', 速度: parseInt(字段[4], 10) || 0, 配置64 });
+  }
+  // 按速度倒序。试过挑会话数最少的，结果更差（6/12 对 2/12）：
+  // 会话少多半是这台根本连不上，不是空闲，别按会话数挑。
+  候选.sort((甲, 乙) => 乙.速度 - 甲.速度);
+  const 节点列表 = [];
+  let 证书 = null;
+  for (const 项 of 候选) {
+    let 配置文本 = '';
+    try {
+      配置文本 = 解家宽配置(项.配置64);
+      if (!取家宽指令(配置文本, 'remote')) 配置文本 = 解家宽配置(项.配置64, true);
+    } catch (错误) {
+      continue;
+    }
+    // 前置只能承载 TCP，UDP 的节点丢掉
+    if ((取家宽指令(配置文本, 'proto') || 'tcp').toLowerCase() !== 'tcp') continue;
+    const 远端 = 取家宽指令(配置文本, 'remote').split(/\s+/);
+    if (!远端[0]) continue;
+    if (!证书) {
+      // 证书全站共用一份，找第一个完整的就够了
+      try {
+        const 全文 = 解家宽配置(项.配置64, true);
+        const 本次证书 = { ca: 取家宽内联块(全文, 'ca'), cert: 取家宽内联块(全文, 'cert'), key: 取家宽内联块(全文, 'key') };
+        if (本次证书.ca && 本次证书.cert && 本次证书.key) 证书 = 本次证书;
+      } catch (错误) {}
+      if (!证书) continue;
+    }
+    节点列表.push({
+      国家: 项.国家,
+      地址: 远端[0],
+      端口: parseInt(远端[1], 10) || 443,
+      加密: 取家宽指令(配置文本, 'cipher') || 'AES-128-CBC',
+      摘要: 取家宽指令(配置文本, 'auth') || 'SHA1'
+    });
+  }
+  return { 节点列表, 证书 };
+}
+
+async function 获取家宽节点() {
+  const 现在 = Date.now();
+  if (家宽缓存 && 现在 - 家宽缓存时间 < 家宽缓存期限) return 家宽缓存;
+  // 节点源的 TLS 很老（没有 TLS1.3，ECDHE 只有 CBC 套件），有的运行环境握不上，
+  // 握不上就退回明文再拉一次。清单本身是公开数据。
+  let 原文 = '';
+  let 最后错误 = null;
+  for (const 源 of [家宽节点源, 家宽节点源.replace(/^https:/, 'http:')]) {
+    try {
+      const 响应 = await fetch(源, {
+        headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'text/plain' },
+        cf: { cacheTtl: 1800, cacheEverything: true }
+      });
+      if (!响应.ok) {
+        最后错误 = new Error('节点源返回 ' + 响应.status);
+        continue;
+      }
+      原文 = await 响应.text();
+      break;
+    } catch (错误) {
+      最后错误 = 错误;
+    }
+  }
+  if (!原文) throw 最后错误 || new Error('节点源没有返回内容');
+  const 结果 = 解析家宽清单(原文);
+  if (!结果.节点列表.length || !结果.证书) throw new Error('没解析出能用的节点');
+  家宽缓存 = 结果;
+  家宽缓存时间 = 现在;
+  return 结果;
+}
+
+// 拉不到节点直接抛错，由调用方回 503，客户端会继续用上一份，不会被空配置覆盖
+async function 生成家宽链式值(链接列表) {
+  const 前置组名 = '\u26a1 CF前置';
+  const 家宽自动 = '\ud83c\udfe0 家宽自动';
+  const 家宽手选 = '\ud83c\udfe0 家宽节点';
+  const 节点选择 = '\ud83d\ude80 节点选择';
+  const 全部前置 = 链接列表.map(解析值链接)
+    .filter(项 => 项 && (项.proto === 解码64('dmxlc3M=') || 项.proto === 解码64('dHJvamFu')));
+  // 落地隧道的握手特征很明显，前置用明文会被一眼认出来，有 TLS 节点就只用 TLS 的
+  const 加密前置 = 全部前置.filter(项 => 项.tls);
+  const 前置节点 = 加密前置.length ? 加密前置 : 全部前置;
+  const 前置名称 = 前置节点.map(项 => 项.name);
+  const 域名系统 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+  const { 节点列表, 证书 } = await 获取家宽节点();
+  const 国家计数 = {};
+  const 家宽项 = 节点列表.map(节点 => {
+    国家计数[节点.国家] = (国家计数[节点.国家] || 0) + 1;
+    return { ...节点, 名称: '\ud83c\udfe0 ' + 节点.国家 + '-家宽-' + String(国家计数[节点.国家]).padStart(2, '0') };
+  });
+  const 头部 = [
+    '# cfnew 家宽订阅：CF 节点带路，落地是住宅宽带',
+    '# 内核要 1.19.25 以上，老内核不认这类节点',
+    '# 节点是网友共享的，掉线很正常，家宽自动会自己往下换',
+    'mixed-port: 7890',
+    'allow-lan: false',
+    'mode: rule',
+    'log-level: info',
+    'ipv6: false',
+    'unified-delay: true',
+    'tcp-concurrent: true',
+    'external-controller: 127.0.0.1:9090',
+    'dns:',
+    '  enable: true',
+    '  ipv6: false',
+    '  enhanced-mode: fake-ip',
+    '  fake-ip-range: 198.18.0.1/16',
+    '  nameserver:',
+    '    - ' + 域名系统,
+    '    - https://1.1.1.1/dns-query',
+    ''
+  ];
+  const 节点段 = ['proxies:'];
+  for (const 项 of 前置节点) 节点段.push(构建值节点行(项));
+  家宽项.forEach((节点, 下标) => {
+    const 行 = [
+      '  - name: "' + 节点.名称 + '"',
+      '    type: ' + 家宽节点类型,
+      '    server: ' + 节点.地址,
+      '    port: ' + 节点.端口,
+      '    proto: tcp',
+      '    username: vpn',
+      '    password: vpn',
+      '    cipher: ' + 节点.加密,
+      '    auth: ' + 节点.摘要,
+      '    udp: false',
+      '    handshake-timeout: 30',
+      '    remote-dns-resolve: true',
+      '    dns: [ 8.8.8.8, 1.1.1.1 ]'
+    ];
+    // 一个前置都没有就退化成直连落地，订阅至少还能用
+    if (前置名称.length) 行.push('    ' + 家宽前置字段 + ': "' + 前置组名 + '"');
+    // 证书全站同一份，第一个节点定锚点，后面引用，全量几十个节点能省下几百 KB
+    if (下标 === 0) {
+      行.push('    ca: &jkca |-', 缩进证书文本(证书.ca, '      '));
+      行.push('    cert: &jkcert |-', 缩进证书文本(证书.cert, '      '));
+      行.push('    key: &jkkey |-', 缩进证书文本(证书.key, '      '));
+    } else {
+      行.push('    ca: *jkca', '    cert: *jkcert', '    key: *jkkey');
+    }
+    节点段.push(行.join('\n'));
+  });
+  const 列出 = 名称列表 => 名称列表.map(名称 => '      - "' + 名称 + '"').join('\n');
+  // 自动组按速度排，决定回落顺序；手选组按国家排，翻起来好找
+  const 按速度 = 家宽项.map(项 => 项.名称);
+  const 按国家 = 家宽项.slice().sort((甲, 乙) => 甲.国家 === 乙.国家 ? 0 : (甲.国家 < 乙.国家 ? -1 : 1)).map(项 => 项.名称);
+  const 分组段 = [解码64('cHJveHktZ3JvdXBzOg==')];
+  if (前置名称.length) {
+    分组段.push('  - name: "' + 前置组名 + '"', '    type: url-test',
+      '    url: https://www.gstatic.com/generate_204', '    interval: 300', '    tolerance: 50',
+      '    proxies:', 列出(前置名称));
+  }
+  // 全量几十个节点，测一轮就是几十次握手，所以间隔拉长、用到才测
+  分组段.push('  - name: "' + 家宽自动 + '"', '    type: fallback',
+    '    url: https://www.gstatic.com/generate_204', '    interval: 1800', '    lazy: true',
+    '    proxies:', 列出(按速度));
+  分组段.push('  - name: "' + 家宽手选 + '"', '    type: select', '    proxies:', 列出(按国家));
+  const 主选列表 = ['      - "' + 家宽自动 + '"', '      - "' + 家宽手选 + '"'];
+  if (前置名称.length) 主选列表.push('      - "' + 前置组名 + '"');
+  主选列表.push('      - DIRECT');
+  分组段.push('  - name: "' + 节点选择 + '"', '    type: select', '    proxies:', 主选列表.join('\n'));
+  const 规则段 = [
+    'rules:',
+    '  - GEOIP,LAN,DIRECT,no-resolve',
+    '  - GEOIP,CN,DIRECT,no-resolve',
+    '  - MATCH,' + 节点选择
+  ];
+  return 头部.concat(节点段, [''], 分组段, [''], 规则段, ['']).join('\n');
+}
+
+async function 处理订阅请求(请求507, 用户506, 网址505 = null) {
+  if (!网址505) 网址505 = new URL(请求507.url);
+  const 最终链接列表 = [];
+  const 工作器域名504 = 网址505.hostname;
+  const 目标503 = 网址505.searchParams.get('target') || 'base64';
+  const 家宽目标 = ['vg', 'jk', 解码64('amlha3Vhbg==')].includes(目标503.toLowerCase());
+  if (家宽目标 && !启用家宽链式) {
+    return new Response('家宽链式没开。去配置管理勾上「开启家宽链式」，或者加环境变量 jk=yes。', {
+      status: 403,
+      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }
+    });
+  }
+  const 别名命名器502 = 创建值节点命名器(false);
+
+  // 如果启用了ECH，使用自定义值
+  let 加密客户端问候配置501 = null;
+  if (启用加密客户端问候) {
+    const 域名系统值500 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+    const 加密客户端问候域名499 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+    加密客户端问候配置501 = `${加密客户端问候域名499}+${域名系统值500}`;
+  }
+  async function 添加节点列表来源列表(列表498) {
+    if (启用明文) {
+      最终链接列表.push(...生成链接列表来源源(列表498, 用户506, 工作器域名504, 加密客户端问候配置501, false, 别名命名器502));
+    }
+    if (启用木马) {
+      最终链接列表.push(...(await 生成木马链接列表来源源(列表498, 用户506, 工作器域名504, 加密客户端问候配置501, false, 别名命名器502)));
+    }
+    if (启用扩展传输) {
+      最终链接列表.push(...生成扩展超文本链接列表来源源(列表498, 用户506, 工作器域名504, 加密客户端问候配置501, false, 别名命名器502));
+    }
+  }
+  if (启用原生地址) {
+    if (当前工作器地区 === 'CUSTOM') {
+      const 原生列表497 = [{
+        ip: 工作器域名504,
+        isp: '原生地址'
+      }];
+      await 添加节点列表来源列表(原生列表497);
+    } else {
+      try {
+        const 原生列表496 = [{
+          ip: 工作器域名504,
+          isp: '原生地址'
+        }];
+        await 添加节点列表来源列表(原生列表496);
+      } catch (错误495) {
+        if (!当前工作器地区) {
+          当前工作器地区 = 'CF';
+        }
+        const 值备用地址494 = await 获取值备用地址(当前工作器地区);
+        if (值备用地址494) {
+          回退地址 = 值备用地址494.domain + ':' + 值备用地址494.port;
+          const 备用列表493 = [{
+            ip: 值备用地址494.domain,
+            isp: 解码64('UHJveHlJUC0=') + 当前工作器地区
+          }];
+          await 添加节点列表来源列表(备用列表493);
+        } else {
+          const 原生列表 = [{
+            ip: 工作器域名504,
+            isp: '原生地址'
+          }];
+          await 添加节点列表来源列表(原生列表);
+        }
+      }
+    }
+  }
+  const 是否有自定义优选 = 自定义优选地址列表.length > 0 || 自定义优选域名列表.length > 0;
+  if (禁用优选) {} else if (是否有自定义优选) {
+    if (自定义优选地址列表.length > 0 && 启用优选地址) {
+      await 添加节点列表来源列表(自定义优选地址列表);
+    }
+    if (自定义优选域名列表.length > 0 && 启用优选域名) {
+      const 自定义域名列表 = 自定义优选域名列表.map(丁值492 => ({
+        ip: 丁值492.domain,
+        isp: 丁值492.name || 丁值492.domain
+      }));
+      await 添加节点列表来源列表(自定义域名列表);
+    }
+  } else {
+    if (启用优选域名) {
+      const 域名列表 = 直连域名列表.map(丁值491 => ({
+        ip: 丁值491.domain,
+        isp: 丁值491.name || 丁值491.domain
+      }));
+      await 添加节点列表来源列表(域名列表);
+    }
+    if (启用优选地址) {
+      if (!优选地址源) {
+        try {
+          const 值地址列表490 = await 获取值地址列表();
+          if (值地址列表490.length > 0) {
+            await 添加节点列表来源列表(值地址列表490);
+          }
+        } catch (错误489) {
+          if (!当前工作器地区) {
+            当前工作器地区 = 'CF';
+          }
+          const 值备用地址488 = await 获取值备用地址(当前工作器地区);
+          if (值备用地址488) {
+            回退地址 = 值备用地址488.domain + ':' + 值备用地址488.port;
+            const 备用列表487 = [{
+              ip: 值备用地址488.domain,
+              isp: 解码64('UHJveHlJUC0=') + 当前工作器地区
+            }];
+            await 添加节点列表来源列表(备用列表487);
+          }
+        }
+      }
+    }
+    if (启用仓库优选) {
+      try {
+        const 新地址列表 = await 获取值解析新地址列表();
+        if (新地址列表.length > 0) {
+          if (启用明文) {
+            最终链接列表.push(...生成链接列表来源新地址列表(新地址列表, 用户506, 工作器域名504, 加密客户端问候配置501, false, 别名命名器502));
+          }
+          if (启用木马) {
+            最终链接列表.push(...(await 生成木马链接列表来源新地址列表(新地址列表, 用户506, 工作器域名504, 加密客户端问候配置501, false, 别名命名器502)));
+          }
+          if (启用扩展传输) {
+            最终链接列表.push(...生成扩展超文本链接列表来源源(新地址列表, 用户506, 工作器域名504, 加密客户端问候配置501, false, 别名命名器502));
+          }
+        }
+      } catch (错误486) {
+        if (!当前工作器地区) {
+          当前工作器地区 = 'CF';
+        }
+        const 值备用地址485 = await 获取值备用地址(当前工作器地区);
+        if (值备用地址485) {
+          回退地址 = 值备用地址485.domain + ':' + 值备用地址485.port;
+          const 备用列表 = [{
+            ip: 值备用地址485.domain,
+            isp: 解码64('UHJveHlJUC0=') + 当前工作器地区
+          }];
+          await 添加节点列表来源列表(备用列表);
+        }
+      }
+    }
+  }
+  if (最终链接列表.length === 0) {
+    const 错误备注 = "所有节点获取失败";
+    const 协议484 = atob('dmxlc3M=');
+    const 错误链接 = `${协议484}://00000000-0000-0000-0000-000000000000@127.0.0.1:80?encryption=none&security=none&type=ws&host=error.com&path=%2F#${encodeURIComponent(错误备注)}`;
+    最终链接列表.push(错误链接);
+  }
+  let 订阅内容;
+  let 内容类型483 = 'text/plain; charset=utf-8';
+  switch (目标503.toLowerCase()) {
+    case atob('Y2xhc2g='):
+    case atob('Y2xhc2hy'):
+    case 解码64('c3Rhc2g='):
+    case 'meta':
+    case 解码64('Y2xhc2htZXRh'):
+      订阅内容 = 生成值值589(最终链接列表);
+      内容类型483 = 'text/yaml; charset=utf-8';
+      break;
+    case 'vg':
+    case 'jk':
+    case 解码64('amlha3Vhbg=='):
+      try {
+        订阅内容 = await 生成家宽链式值(最终链接列表);
+      } catch (错误) {
+        return new Response('家宽节点暂时拉不到：' + (错误 && 错误.message ? 错误.message : 错误) + '\n过几分钟再更新，客户端会先用着上一份。', {
+          status: 503,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }
+        });
+      }
+      内容类型483 = 'text/yaml; charset=utf-8';
+      break;
+    case atob('c3VyZ2U='):
+    case atob('c3VyZ2Uy'):
+    case atob('c3VyZ2Uz'):
+    case atob('c3VyZ2U0'):
+      订阅内容 = 生成值值562(最终链接列表);
+      内容类型483 = 'text/plain; charset=utf-8';
+      break;
+    case atob('cXVhbnR1bXVsdA=='):
+    case atob('cXVhbng='):
+    case 解码64('cXVhbng='):
+      订阅内容 = 生成值值(最终链接列表);
+      内容类型483 = 'text/plain; charset=utf-8';
+      break;
+    case atob('c3M='):
+    case atob('c3Ny'):
+      订阅内容 = btoa(最终链接列表.join('\n'));
+      break;
+    case atob('djJyYXk='):
+      订阅内容 = btoa(最终链接列表.join('\n'));
+      break;
+    case atob('bG9vbg=='):
+      订阅内容 = 生成值值552(最终链接列表);
+      内容类型483 = 'text/plain; charset=utf-8';
+      break;
+    case atob('c2luZ2JveA=='):
+    case 解码64('c2luZy1ib3g='):
+    case 解码64('c2luZ2JveA=='):
+      订阅内容 = 生成值值数据对象(最终链接列表);
+      内容类型483 = 'application/json; charset=utf-8';
+      break;
+    default:
+      订阅内容 = btoa(最终链接列表.join('\n'));
+  }
+  const 响应头部列表 = {
+    'Content-Type': 内容类型483,
+    'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
+  };
+
+  // 添加ECH状态到响应头
+  if (启用加密客户端问候) {
+    响应头部列表['X-ECH-Status'] = 'ENABLED';
+    if (加密客户端问候配置501) {
+      响应头部列表['X-ECH-Config-Length'] = String(加密客户端问候配置501.length);
+    }
+  }
+  return new Response(订阅内容, {
+    headers: 响应头部列表
+  });
+}
+function 生成链接列表来源源(列表482, 用户481, 工作器域名480, 加密客户端问候配置479 = null, 跳过编号478 = false, 别名命名器477 = null) {
+  const 云墙超文本端口476 = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+  const 云墙安全超文本端口475 = [443, 2053, 2083, 2087, 2096, 8443];
+  const 默认安全超文本值474 = [443];
+  const 默认超文本值473 = 禁用非传输层安全 ? [] : [80];
+  const 链接列表472 = [];
+  const 网页套接字路径471 = '/?ed=2048';
+  const 协议470 = atob('dmxlc3M=');
+  const 制作节点名称469 = 别名命名器477 || 创建值节点命名器(跳过编号478);
+  for (const 项目468 of 列表482) {
+    const 安全地址467 = 项目468.ip.includes(':') ? `[${项目468.ip}]` : 项目468.ip;
+    let 值值生成466 = [];
+    if (项目468.port) {
+      const 端口465 = 项目468.port;
+      if (云墙安全超文本端口475.includes(端口465)) {
+        值值生成466.push({
+          port: 端口465,
+          tls: true
+        });
+      } else if (云墙超文本端口476.includes(端口465)) {
+        if (!禁用非传输层安全) {
+          值值生成466.push({
+            port: 端口465,
+            tls: false
+          });
+        }
+      } else {
+        值值生成466.push({
+          port: 端口465,
+          tls: true
+        });
+      }
+    } else {
+      默认安全超文本值474.forEach(端口464 => {
+        值值生成466.push({
+          port: 端口464,
+          tls: true
+        });
+      });
+      默认超文本值473.forEach(端口463 => {
+        值值生成466.push({
+          port: 端口463,
+          tls: false
+        });
+      });
+    }
+    for (const {
+      port: 端口462,
+      tls: 传输层安全461
+    } of 值值生成466) {
+      const 网页套接字节点名称460 = 制作节点名称469(项目468);
+      if (传输层安全461) {
+        const 网页套接字参数459 = new URLSearchParams({
+          encryption: 'none',
+          security: 'tls',
+          sni: 工作器域名480,
+          // randomized fingerprint may cause TLS compatibility issues with some Xray/uTLS clients.
+          // Use chrome as default for better compatibility (chrome is also required when ECH is enabled).
+          fp: 'chrome',
+          type: 'ws',
+          host: 工作器域名480,
+          path: 网页套接字路径471
+        });
+        处理值应用层协议协商值(网页套接字参数459);
+
+        // 如果启用了ECH，添加ech参数（ECH需要伪装成Chrome浏览器）
+        if (启用加密客户端问候) {
+          const 域名系统值458 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+          const 加密客户端问候域名457 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+          网页套接字参数459.set('ech', `${加密客户端问候域名457}+${域名系统值458}`);
+        }
+        链接列表472.push(`${协议470}://${用户481}@${安全地址467}:${端口462}?${网页套接字参数459.toString()}#${encodeURIComponent(网页套接字节点名称460)}`);
+      } else {
+        const 网页套接字参数456 = new URLSearchParams({
+          encryption: 'none',
+          security: 'none',
+          type: 'ws',
+          host: 工作器域名480,
+          path: 网页套接字路径471
+        });
+        链接列表472.push(`${协议470}://${用户481}@${安全地址467}:${端口462}?${网页套接字参数456.toString()}#${encodeURIComponent(网页套接字节点名称460)}`);
+      }
+    }
+  }
+  return 链接列表472;
+}
+async function 生成木马链接列表来源源(列表455, 用户454, 工作器域名453, 加密客户端问候配置452 = null, 跳过编号451 = false, 别名命名器450 = null) {
+  const 云墙超文本端口449 = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+  const 云墙安全超文本端口448 = [443, 2053, 2083, 2087, 2096, 8443];
+  const 默认安全超文本值 = [443];
+  const 默认超文本值 = 禁用非传输层安全 ? [] : [80];
+  const 链接列表447 = [];
+  const 网页套接字路径446 = '/?ed=2048';
+  const 密码445 = 传输路径 || 用户454;
+  const 制作节点名称444 = 别名命名器450 || 创建值节点命名器(跳过编号451);
+  for (const 项目443 of 列表455) {
+    const 安全地址442 = 项目443.ip.includes(':') ? `[${项目443.ip}]` : 项目443.ip;
+    let 值值生成 = [];
+    if (项目443.port) {
+      const 端口441 = 项目443.port;
+      if (云墙安全超文本端口448.includes(端口441)) {
+        值值生成.push({
+          port: 端口441,
+          tls: true
+        });
+      } else if (云墙超文本端口449.includes(端口441)) {
+        if (!禁用非传输层安全) {
+          值值生成.push({
+            port: 端口441,
+            tls: false
+          });
+        }
+      } else {
+        值值生成.push({
+          port: 端口441,
+          tls: true
+        });
+      }
+    } else {
+      默认安全超文本值.forEach(端口440 => {
+        值值生成.push({
+          port: 端口440,
+          tls: true
+        });
+      });
+      默认超文本值.forEach(端口439 => {
+        值值生成.push({
+          port: 端口439,
+          tls: false
+        });
+      });
+    }
+    for (const {
+      port: 端口438,
+      tls: 传输层安全
+    } of 值值生成) {
+      const 网页套接字节点名称437 = 制作节点名称444(项目443);
+      if (传输层安全) {
+        const 网页套接字参数436 = new URLSearchParams({
+          security: 'tls',
+          sni: 工作器域名453,
+          fp: 'chrome',
+          type: 'ws',
+          host: 工作器域名453,
+          path: 网页套接字路径446
+        });
+        处理值应用层协议协商值(网页套接字参数436);
+
+        // 如果启用了ECH，添加ech参数（ECH需要伪装成Chrome浏览器）
+        if (启用加密客户端问候) {
+          const 域名系统值435 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+          const 加密客户端问候域名434 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+          网页套接字参数436.set('ech', `${加密客户端问候域名434}+${域名系统值435}`);
+        }
+        链接列表447.push(`${atob('dHJvamFuOi8v')}${密码445}@${安全地址442}:${端口438}?${网页套接字参数436.toString()}#${encodeURIComponent(网页套接字节点名称437)}`);
+      } else {
+        const 网页套接字参数 = new URLSearchParams({
+          security: 'none',
+          type: 'ws',
+          host: 工作器域名453,
+          path: 网页套接字路径446
+        });
+        链接列表447.push(`${atob('dHJvamFuOi8v')}${密码445}@${安全地址442}:${端口438}?${网页套接字参数.toString()}#${encodeURIComponent(网页套接字节点名称437)}`);
+      }
+    }
+  }
+  return 链接列表447;
+}
+async function 计算值摘要(文本434) {
+  const 缓冲区434 = await crypto.subtle.digest('MD5', new TextEncoder().encode(文本434));
+  return Array.from(new Uint8Array(缓冲区434)).map(字节434 => 字节434.toString(16).padStart(2, '0')).join('');
+}
+async function 获取值地址列表() {
+  const 分组线路映射 = {
+    ctcc: '电信',
+    cucc: '联通',
+    cmcc: '移动',
+    bgp: '多线',
+    ipv6: 'IPv6'
+  };
+  const 值4已启用 = 获取配置值('ipv4', '') === '' || 获取配置值('ipv4', 'yes') !== 'no';
+  const 值6已启用 = 获取配置值('ipv6', '') === '' || 获取配置值('ipv6', 'yes') !== 'no';
+  const 值值432 = 获取配置值('ispMobile', '') === '' || 获取配置值('ispMobile', 'yes') !== 'no';
+  const 值值431 = 获取配置值('ispUnicom', '') === '' || 获取配置值('ispUnicom', 'yes') !== 'no';
+  const 值值430 = 获取配置值('ispTelecom', '') === '' || 获取配置值('ispTelecom', 'yes') !== 'no';
+  try {
+    const 时间戳434 = String(Date.now());
+    const 内层摘要434 = await 计算值摘要(解码64('RGRsVHh0TjBzVU91'));
+    const 请求密钥434 = await 计算值摘要(内层摘要434 + 解码64('NzBjbG91ZGZsYXJlYXBpa2V5') + 时间戳434);
+    const 响应434 = await fetch(`${解码64('aHR0cHM6Ly9hcGkudW91aW4uY29tL2luZGV4LnBocC9pbmRleC9DbG91ZGZsYXJl')}?key=${请求密钥434}&time=${时间戳434}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0'
+      }
+    });
+    if (!响应434.ok) return [];
+    const 数据434 = await 响应434.json();
+    const 分组集合434 = 数据434 && 数据434.data;
+    if (!分组集合434) return [];
+    const 结果列表433 = [];
+    for (const 分组名434 of Object.keys(分组线路映射)) {
+      const 是否值6434 = 分组名434 === 'ipv6';
+      if (是否值6434 && !值6已启用) continue;
+      if (!是否值6434 && !值4已启用) continue;
+      const 线路名434 = 分组线路映射[分组名434];
+      if (线路名434 === '移动' && !值值432) continue;
+      if (线路名434 === '联通' && !值值431) continue;
+      if (线路名434 === '电信' && !值值430) continue;
+      const 分组434 = 分组集合434[分组名434];
+      const 条目列表434 = 分组434 && Array.isArray(分组434.info) ? 分组434.info : [];
+      for (const 条目434 of 条目列表434) {
+        const 地址434 = 规范化节点主机(条目434 && 条目434.ip);
+        if (!地址434) continue;
+        结果列表433.push({
+          isp: 线路名434,
+          ip: 地址434,
+          colo: ''
+        });
+      }
+    }
+    return 结果列表433;
+  } catch (事件值427) {}
+  return [];
+}
+async function 处理网页套接字请求(请求417) {
+  // 从请求URL的path query中读取客户端自定义参数
+  // 从 path query 读取覆盖参数
+  const 请求网址 = new URL(请求417.url);
+  const 请求回退416 = 请求网址.searchParams.get('p') || '';
+  const 请求地区415 = (请求网址.searchParams.get('wk') || '').toUpperCase();
+  const 请求值字符串 = 请求网址.searchParams.get('rm') || '';
+  const 请求值414 = 请求值字符串 ? 请求值字符串.toLowerCase() !== 'no' : null;
+  const 请求代理字符串 = 请求网址.searchParams.get('s') || '';
+  let 请求代理配置413 = null;
+  if (请求代理字符串) {
+    try {
+      请求代理配置413 = 解析代理配置(请求代理字符串);
+    } catch (忽略值412) {}
+  }
+
+  // 检测并设置当前Worker地区，确保WebSocket请求能正确进行就近匹配
+  // 优先级：客户端path参数wk > 全局manualWorkerRegion > 自动检测
+  let 实际地区411 = 当前工作器地区;
+  if (!实际地区411 || 实际地区411 === '') {
+    if (请求地区415) {
+      实际地区411 = 请求地区415;
+    } else if (手动工作器地区 && 手动工作器地区.trim()) {
+      实际地区411 = 手动工作器地区.trim().toUpperCase();
+    } else {
+      实际地区411 = 'CF';
+    }
+  } else if (请求地区415) {
+    实际地区411 = 请求地区415;
+  }
+  const 网页套接字值 = new WebSocketPair();
+  const [客户端值, 值值410] = Object.values(网页套接字值);
+  值值410.accept();
+  值值410.binaryType = 'arraybuffer';
+  let 远程连接值409 = {
+    socket: null,
+    writer: null,
+    drainUpload: null
+  };
+  let 是否域名系统值 = false;
+  let 协议类型 = null;
+  let 值值408 = false;
+  let 传输值 = false;
+  const 值队列 = 创建块队列(传输上传包大小, 传输上传队列上限, 传输上传队列上限 >> 8);
+  const 请求值407 = 请求417.fetcher;
+  function 处理值远程写入器() {
+    try {
+      远程连接值409.writer?.releaseLock();
+    } catch (忽略值406) {}
+    远程连接值409.writer = null;
+  }
+  function 关闭传输() {
+    if (传输值) return;
+    传输值 = true;
+    值队列.clear();
+    处理值远程写入器();
+    try {
+      远程连接值409.socket?.close();
+    } catch (忽略值405) {}
+    关闭套接字值(值值410);
+  }
+  function 处理队列值(块404) {
+    const 数据403 = 处理值值8数组(块404);
+    if (!数据403.byteLength) return true;
+    if (!值队列.sow(数据403)) {
+      关闭传输();
+      return false;
+    }
+    远程连接值409.drainUpload();
+    return true;
+  }
+  async function 处理值值402() {
+    if (值值408 || 传输值 || !远程连接值409.writer) return;
+    值值408 = true;
+    try {
+      for (;;) {
+        if (传输值 || !远程连接值409.writer) break;
+        const [数据401] = 值队列.bundle();
+        if (!数据401) break;
+        await 远程连接值409.writer.write(数据401);
+      }
+    } catch (忽略值400) {
+      关闭传输();
+    } finally {
+      值值408 = false;
+      if (!值队列.empty && !传输值 && 远程连接值409.writer) queueMicrotask(处理值值402);
+    }
+  }
+  远程连接值409.drainUpload = () => {
+    if (!值值408 && !值队列.empty && 远程连接值409.writer) queueMicrotask(处理值值402);
+  };
+  const 值数据399 = 请求417.headers.get(atob('c2VjLXdlYnNvY2tldC1wcm90b2NvbA==')) || '';
+  const 本地值398 = 制作值流(值值410, 值数据399);
+  本地值398.pipeTo(new WritableStream({
+    async write(块397) {
+      if (传输值) return;
+      const 数据396 = 处理值值8数组(块397);
+      if (是否域名系统值) return await 处理值用户数据报(数据396, 值值410, null, 请求值407);
+      if (远程连接值409.socket && 远程连接值409.writer) {
+        if (!处理队列值(数据396)) throw new Error('upload queue overflow');
+        return;
+      }
+      if (协议类型) {
+        if (!处理队列值(数据396)) throw new Error('upload queue overflow');
+        return;
+      }
+      if (!协议类型) {
+        if (启用明文 && 数据396.byteLength >= 24) {
+          const 轻量协议结果 = 解析网页套接字值头部(数据396, 认证令牌);
+          if (!轻量协议结果.hasError) {
+            协议类型 = 解码64('dmxlc3M=');
+            const {
+              addressType: 地址类型395,
+              port: 端口394,
+              hostname: 主机名393,
+              rawIndex: 原始索引,
+              version: 本地值392,
+              isUDP: 是否用户数据报391
+            } = 轻量协议结果;
+            if (是否用户数据报391) {
+              if (端口394 === 53) 是否域名系统值 = true;else throw new Error(错误_仅支持域名系统用户数据报);
+            }
+            const 值头部390 = new Uint8Array([本地值392[0], 0]);
+            const 原始数据389 = 数据396.subarray(原始索引);
+            if (是否域名系统值) return 处理值用户数据报(原始数据389, 值值410, 值头部390, 请求值407);
+            await 处理值值384(地址类型395, 主机名393, 端口394, 原始数据389, 值值410, 值头部390, 远程连接值409, 请求回退416, 实际地区411, 请求值414, 请求代理配置413, 请求值407);
+            return;
+          }
+        }
+        if (启用木马 && 数据396.byteLength >= 56) {
+          const 值结果 = await 解析木马头部(数据396, 认证令牌);
+          if (!值结果.hasError) {
+            协议类型 = atob('dHJvamFu');
+            const {
+              addressType: 地址类型388,
+              port: 端口387,
+              hostname: 主机名386,
+              rawClientData: 原始客户端数据
+            } = 值结果;
+            await 处理值值384(地址类型388, 主机名386, 端口387, 原始客户端数据, 值值410, null, 远程连接值409, 请求回退416, 实际地区411, 请求值414, 请求代理配置413, 请求值407);
+            return;
+          }
+        }
+        throw new Error('Invalid protocol or authentication failed');
+      }
+    }
+  })).catch(错误385 => {
+    关闭传输();
+  });
+  return new Response(null, {
+    status: 101,
+    webSocket: 客户端值
+  });
+}
+async function 处理值值384(地址类型383, 主机, 端口数字, 原始数据, 网页套接字382, 值头部381, 远程连接值, 请求回退 = '', 请求地区 = '', 请求值380 = null, 请求代理配置 = null, 请求值379 = null) {
+  // 优先使用客户端path参数，其次回退到全局配置
+  const 实际回退 = 请求回退 || 回退地址;
+  const 实际地区 = 请求地区 || 当前工作器地区;
+  const 实际地区匹配 = 请求值380 !== null ? 请求值380 : 启用地区匹配;
+  const 实际代理配置 = 请求代理配置 || 已解析代理5配置;
+  const 实际代理已启用 = 请求代理配置 ? true : 是否代理已启用;
+  const 值数据378 = 处理值值8数组(原始数据);
+  async function 连接值发送(地址377, 端口376, 值代理 = false) {
+    // 走代理时首包交给握手函数在释放写入器前发出，避免换写入器导致连接被重置
+    const 远程值375 = 值代理 ? await 处理值代理连接(地址类型383, 地址377, 端口376, 实际代理配置, 请求值379, 值数据378) : await 连接值套接字(地址377, 端口376, 请求值379, 传输连接竞速数);
+    const 写入器374 = 远程值375.writable.getWriter();
+    if (!值代理 && 值数据378.byteLength) await 写入器374.write(值数据378);
+    return {
+      remoteSock: 远程值375,
+      writer: 写入器374
+    };
+  }
+  function 处理值值当前(远程值373, 写入器372) {
+    if (远程连接值.socket !== 远程值373) return;
+    try {
+      写入器372?.releaseLock();
+    } catch (忽略值371) {}
+    远程连接值.socket = null;
+    远程连接值.writer = null;
+  }
+  function 处理值远程(远程值370, 写入器369, 重试值368) {
+    try {
+      if (远程连接值.writer && 远程连接值.writer !== 写入器369) {
+        远程连接值.writer.releaseLock();
+      }
+    } catch (忽略值367) {}
+    远程连接值.socket = 远程值370;
+    远程连接值.writer = 写入器369;
+    远程连接值.drainUpload?.();
+    远程值370.closed.catch(() => {}).finally(() => {
+      if (远程连接值.socket === 远程值370) 关闭套接字值(网页套接字382);
+    });
+    连接值279(远程值370, 网页套接字382, 值头部381, 重试值368).finally(() => {
+      if (远程连接值.socket === 远程值370) {
+        try {
+          写入器369.releaseLock();
+        } catch (忽略值366) {}
+        远程连接值.writer = null;
+      }
+    });
+  }
+  async function 处理重试连接() {
+    // 只走代理：不回落到直连或备用地址，避免出口 IP 泄漏
+    if (仅走代理 && 实际代理已启用) {
+      关闭套接字值(网页套接字382);
+      return;
+    }
+    if (启用代理降级 && 实际代理已启用) {
+      try {
+        const {
+          remoteSock: 代理套接字,
+          writer: 代理写入器
+        } = await 连接值发送(主机, 端口数字, true);
+        处理值远程(代理套接字, 代理写入器, null);
+        return;
+      } catch (代理错误) {
+        let 备用主机365, 备用端口364;
+        if (实际回退 && 实际回退.trim()) {
+          const 已解析363 = 解析地址值端口(实际回退);
+          备用主机365 = 已解析363.address;
+          备用端口364 = 已解析363.port || 端口数字;
+        } else {
+          const 值备用地址362 = await 获取值备用地址(实际地区, 实际地区匹配);
+          备用主机365 = 值备用地址362 ? 值备用地址362.domain : 主机;
+          备用端口364 = 值备用地址362 ? 值备用地址362.port : 端口数字;
+        }
+        try {
+          const {
+            remoteSock: 回退套接字361,
+            writer: 回退写入器360
+          } = await 连接值发送(备用主机365, 备用端口364, false);
+          处理值远程(回退套接字361, 回退写入器360, null);
+        } catch (回退错误359) {
+          关闭套接字值(网页套接字382);
+        }
+      }
+    } else {
+      let 备用主机, 备用端口;
+      if (实际回退 && 实际回退.trim()) {
+        const 已解析 = 解析地址值端口(实际回退);
+        备用主机 = 已解析.address;
+        备用端口 = 已解析.port || 端口数字;
+      } else {
+        const 值备用地址 = await 获取值备用地址(实际地区, 实际地区匹配);
+        备用主机 = 值备用地址 ? 值备用地址.domain : 主机;
+        备用端口 = 值备用地址 ? 值备用地址.port : 端口数字;
+      }
+      try {
+        const {
+          remoteSock: 回退套接字,
+          writer: 回退写入器
+        } = await 连接值发送(备用主机, 备用端口, 实际代理已启用);
+        处理值远程(回退套接字, 回退写入器, null);
+      } catch (回退错误) {
+        关闭套接字值(网页套接字382);
+      }
+    }
+  }
+  try {
+    // 首跳是否走代理：只走代理 → 必走；优先直连 → 不走；其余按代理是否配置
+    const 首跳走代理 = 仅走代理 && 实际代理已启用 ? true : 启用代理降级 ? false : 实际代理已启用;
+    const {
+      remoteSock: 值套接字358,
+      writer: 值写入器
+    } = await 连接值发送(主机, 端口数字, 首跳走代理);
+    处理值远程(值套接字358, 值写入器, () => {
+      处理值值当前(值套接字358, 值写入器);
+      处理重试连接();
+    });
+  } catch (错误357) {
+    await 处理重试连接();
+  }
+}
+function 处理值值8数组(块356) {
+  if (块356 instanceof Uint8Array) return 块356;
+  if (块356 instanceof ArrayBuffer) return new Uint8Array(块356);
+  if (ArrayBuffer.isView(块356)) return new Uint8Array(块356.buffer, 块356.byteOffset, 块356.byteLength);
+  return new Uint8Array(块356);
+}
+function 拼接值8数组(头部355, 主体354) {
+  const 头值353 = 处理值值8数组(头部355);
+  const 乙值352 = 处理值值8数组(主体354);
+  const 输出351 = new Uint8Array(头值353.byteLength + 乙值352.byteLength);
+  输出351.set(头值353);
+  输出351.set(乙值352, 头值353.byteLength);
+  return 输出351;
+}
+function 创建块队列(本地值350, 值值349 = 本地值350, 项目列表上限 = Math.max(1, 值值349 >> 8)) {
+  let 队列 = [];
+  let 头部348 = 0;
+  let 值字节347 = 0;
+  let 值缓冲346 = null;
+  function 处理本地值345() {
+    if (头部348 > 32 && 头部348 * 2 >= 队列.length) {
+      队列 = 队列.slice(头部348);
+      头部348 = 0;
+    }
+  }
+  function 处理本地值344() {
+    if (头部348 >= 队列.length) return null;
+    const 数据343 = 队列[头部348];
+    队列[头部348++] = undefined;
+    值字节347 -= 数据343.byteLength;
+    处理本地值345();
+    return 数据343;
+  }
+  return {
+    get empty() {
+      return 头部348 >= 队列.length;
+    },
+    clear() {
+      队列 = [];
+      头部348 = 0;
+      值字节347 = 0;
+    },
+    sow(数据342) {
+      const 数量值 = 数据342?.byteLength || 0;
+      if (!数量值) return true;
+      if (值字节347 + 数量值 > 值值349 || 队列.length - 头部348 >= 项目列表上限) return false;
+      队列.push(数据342);
+      值字节347 += 数量值;
+      return true;
+    },
+    bundle(数据341 = null) {
+      数据341 ||= 处理本地值344();
+      if (!数据341 || 头部348 >= 队列.length || 数据341.byteLength >= 本地值350) return [数据341, false];
+      let 本地值340 = 数据341.byteLength;
+      let 结束 = 头部348;
+      while (结束 < 队列.length) {
+        const 本地值339 = 队列[结束];
+        const 值值338 = 本地值340 + 本地值339.byteLength;
+        if (值值338 > 本地值350) break;
+        本地值340 = 值值338;
+        结束++;
+      }
+      if (结束 === 头部348) return [数据341, false];
+      const 输出 = 值缓冲346 ||= new Uint8Array(本地值350);
+      输出.set(数据341);
+      let 偏移337 = 数据341.byteLength;
+      while (头部348 < 结束) {
+        const 本地值336 = 队列[头部348];
+        队列[头部348++] = undefined;
+        值字节347 -= 本地值336.byteLength;
+        输出.set(本地值336, 偏移337);
+        偏移337 += 本地值336.byteLength;
+      }
+      处理本地值345();
+      return [输出.subarray(0, 本地值340), true];
+    }
+  };
+}
+function 创建值值(网页套接字335) {
+  const 本地值334 = 传输下载包大小;
+  const 尾部 = 传输下载尾部;
+  const 值值333 = Math.max(4096, 尾部 << 3);
+  let 本地值332 = new Uint8Array(本地值334);
+  let 值字节 = 0;
+  let 计时器 = 0;
+  let 值值331 = false;
+  let 本地值330 = 0;
+  let 值键 = 0;
+  let 值值329 = 0;
+  function 刷新() {
+    if (计时器) clearTimeout(计时器);
+    计时器 = 0;
+    值值331 = false;
+    if (!值字节) return;
+    if (网页套接字335.readyState === 1) 网页套接字335.send(本地值332.subarray(0, 值字节).slice());
+    本地值332 = new Uint8Array(本地值334);
+    值字节 = 0;
+    值值329 = 0;
+  }
+  function 处理本地值() {
+    if (计时器 || 值值331) return;
+    值值331 = true;
+    值键 = 本地值330;
+    queueMicrotask(() => {
+      值值331 = false;
+      if (!值字节 || 计时器) return;
+      if (本地值334 - 值字节 < 尾部) return 刷新();
+      计时器 = setTimeout(() => {
+        计时器 = 0;
+        if (!值字节) return;
+        if (本地值334 - 值字节 < 尾部) return 刷新();
+        if (值值329 < 2 && (本地值330 !== 值键 || 值字节 < 值值333)) {
+          值值329++;
+          值键 = 本地值330;
+          return 处理本地值();
+        }
+        刷新();
+      }, Math.max(传输下载延迟, 1));
+    });
+  }
+  return {
+    send(块328) {
+      const 数据327 = 处理值值8数组(块328);
+      let 偏移326 = 0;
+      const 本地值325 = 数据327.byteLength;
+      if (!本地值325) return;
+      while (偏移326 < 本地值325) {
+        if (!值字节 && 本地值325 - 偏移326 >= 本地值334) {
+          const 大小324 = Math.min(本地值334, 本地值325 - 偏移326);
+          if (网页套接字335.readyState === 1) 网页套接字335.send(偏移326 || 大小324 !== 本地值325 ? 数据327.subarray(偏移326, 偏移326 + 大小324) : 数据327);
+          偏移326 += 大小324;
+          continue;
+        }
+        const 大小323 = Math.min(本地值334 - 值字节, 本地值325 - 偏移326);
+        本地值332.set(数据327.subarray(偏移326, 偏移326 + 大小323), 值字节);
+        值字节 += 大小323;
+        偏移326 += 大小323;
+        本地值330++;
+        if (值字节 === 本地值334 || 本地值334 - 值字节 < 尾部) 刷新();else 处理本地值();
+      }
+    },
+    flush: 刷新
+  };
+}
+function 处理打开值套接字(地址322, 端口321, 请求值320 = null) {
+  const 目标 = {
+    hostname: 地址322,
+    port: 端口321
+  };
+  if (请求值320 && typeof 请求值320.connect === 'function') return 请求值320.connect(目标);
+  return 连接(目标);
+}
+async function 处理打开值套接字值(地址319, 端口318, 请求值317 = null) {
+  try {
+    const 套接字316 = 处理打开值套接字(地址319, 端口318, 请求值317);
+    if (套接字316?.opened) await 套接字316.opened;
+    return 套接字316;
+  } catch (错误315) {
+    if (!请求值317) throw 错误315;
+    const 套接字314 = 连接({
+      hostname: 地址319,
+      port: 端口318
+    });
+    if (套接字314?.opened) await 套接字314.opened;
+    return 套接字314;
+  }
+}
+async function 连接值套接字(地址313, 端口312, 请求值311 = null, 竞速数量 = 1) {
+  const 数量 = Math.max(1, 竞速数量 | 0);
+  if (数量 <= 1) return 处理打开值套接字值(地址313, 端口312, 请求值311);
+  const 本地值310 = Array.from({
+    length: 数量
+  }, () => 处理打开值套接字值(地址313, 端口312, 请求值311));
+  const 本地值309 = await Promise.any(本地值310);
+  本地值310.forEach(本地值308 => {
+    本地值308.then(套接字307 => {
+      if (套接字307 !== 本地值309) {
+        try {
+          套接字307.close();
+        } catch (忽略值306) {}
+      }
+    }, () => {});
+  });
+  return 本地值309;
+}
+function 获取唯一标识字节(令牌305) {
+  if (唯一标识字节缓存.has(令牌305)) return 唯一标识字节缓存.get(令牌305);
+  const 十六进制 = String(令牌305 || '').replace(/-/g, '');
+  if (十六进制.length !== 32) return null;
+  const 字节304 = new Uint8Array(16);
+  for (let 索引值303 = 0; 索引值303 < 16; 索引值303++) {
+    const 值302 = Number.parseInt(十六进制.slice(索引值303 * 2, 索引值303 * 2 + 2), 16);
+    if (Number.isNaN(值302)) return null;
+    字节304[索引值303] = 值302;
+  }
+  if (唯一标识字节缓存.size > 16) 唯一标识字节缓存.clear();
+  唯一标识字节缓存.set(令牌305, 字节304);
+  return 字节304;
+}
+function 处理值唯一标识(字节301, 偏移300, 令牌299) {
+  const 标识298 = 获取唯一标识字节(令牌299);
+  return !!标识298 && 字节301[偏移300] === 标识298[0] && 字节301[偏移300 + 1] === 标识298[1] && 字节301[偏移300 + 2] === 标识298[2] && 字节301[偏移300 + 3] === 标识298[3] && 字节301[偏移300 + 4] === 标识298[4] && 字节301[偏移300 + 5] === 标识298[5] && 字节301[偏移300 + 6] === 标识298[6] && 字节301[偏移300 + 7] === 标识298[7] && 字节301[偏移300 + 8] === 标识298[8] && 字节301[偏移300 + 9] === 标识298[9] && 字节301[偏移300 + 10] === 标识298[10] && 字节301[偏移300 + 11] === 标识298[11] && 字节301[偏移300 + 12] === 标识298[12] && 字节301[偏移300 + 13] === 标识298[13] && 字节301[偏移300 + 14] === 标识298[14] && 字节301[偏移300 + 15] === 标识298[15];
+}
+function 解析网页套接字值头部(块297, 令牌) {
+  const 字节296 = 处理值值8数组(块297);
+  if (字节296.byteLength < 24) return {
+    hasError: true,
+    message: 错误_无效数据
+  };
+  const 本地值295 = 字节296.subarray(0, 1);
+  if (!处理值唯一标识(字节296, 1, 令牌)) return {
+    hasError: true,
+    message: 错误_无效用户
+  };
+  const 值长度294 = 字节296[17];
+  const 命令索引 = 18 + 值长度294;
+  if (字节296.byteLength < 命令索引 + 5) return {
+    hasError: true,
+    message: 错误_无效数据
+  };
+  const 命令293 = 字节296[命令索引];
+  let 是否用户数据报 = false;
+  if (命令293 === 1) {} else if (命令293 === 2) {
+    是否用户数据报 = true;
+  } else {
+    return {
+      hasError: true,
+      message: 错误_不支持命令
+    };
+  }
+  const 端口索引292 = 19 + 值长度294;
+  const 端口291 = 字节296[端口索引292] << 8 | 字节296[端口索引292 + 1];
+  let 地址索引290 = 端口索引292 + 2,
+    地址长度289 = 0,
+    地址值索引 = 地址索引290 + 1,
+    主机名288 = '';
+  const 地址类型287 = 字节296[地址索引290];
+  switch (地址类型287) {
+    case 地址类型_四版:
+      地址长度289 = 4;
+      if (字节296.byteLength < 地址值索引 + 地址长度289) return {
+        hasError: true,
+        message: 错误_无效数据
+      };
+      主机名288 = `${字节296[地址值索引]}.${字节296[地址值索引 + 1]}.${字节296[地址值索引 + 2]}.${字节296[地址值索引 + 3]}`;
+      break;
+    case 地址类型_网址:
+      if (字节296.byteLength < 地址值索引 + 1) return {
+        hasError: true,
+        message: 错误_无效数据
+      };
+      地址长度289 = 字节296[地址值索引++];
+      if (字节296.byteLength < 地址值索引 + 地址长度289) return {
+        hasError: true,
+        message: 错误_无效数据
+      };
+      主机名288 = 共享解码器.decode(字节296.subarray(地址值索引, 地址值索引 + 地址长度289));
+      break;
+    case 地址类型_六版:
+      地址长度289 = 16;
+      if (字节296.byteLength < 地址值索引 + 地址长度289) return {
+        hasError: true,
+        message: 错误_无效数据
+      };
+      const 值6286 = [];
+      const 值6视图 = new DataView(字节296.buffer, 字节296.byteOffset + 地址值索引, 地址长度289);
+      for (let 索引值285 = 0; 索引值285 < 8; 索引值285++) 值6286.push(值6视图.getUint16(索引值285 * 2).toString(16));
+      主机名288 = 值6286.join(':');
+      break;
+    default:
+      return {
+        hasError: true,
+        message: `${错误_无效地址类型}: ${地址类型287}`
+      };
+  }
+  if (!主机名288) return {
+    hasError: true,
+    message: `${错误_空地址}: ${地址类型287}`
+  };
+  return {
+    hasError: false,
+    addressType: 地址类型287,
+    port: 端口291,
+    hostname: 主机名288,
+    isUDP: 是否用户数据报,
+    rawIndex: 地址值索引 + 地址长度289,
+    version: 本地值295
+  };
+}
+function 制作值流(套接字284, 值数据头部) {
+  let 本地值283 = false;
+  return new ReadableStream({
+    start(控制器282) {
+      套接字284.addEventListener('message', 事件 => {
+        if (!本地值283) 控制器282.enqueue(处理值值8数组(事件.data));
+      });
+      套接字284.addEventListener('close', () => {
+        if (!本地值283) {
+          关闭套接字值(套接字284);
+          控制器282.close();
+        }
+      });
+      套接字284.addEventListener('error', 错误281 => 控制器282.error(错误281));
+      const {
+        earlyData: 值数据,
+        error: 错误280
+      } = 处理基础64值数组(值数据头部);
+      if (错误280) 控制器282.error(错误280);else if (值数据) 控制器282.enqueue(处理值值8数组(值数据));
+    },
+    cancel() {
+      本地值283 = true;
+      关闭套接字值(套接字284);
+    }
+  });
+}
+async function 连接值279(远程套接字, 网页套接字278, 头部数据, 重试值) {
+  let 头部277 = 头部数据,
+    是否有数据 = false,
+    本地值276 = false;
+
+  // 关键：直连有时握手成功但远端长时间无数据，需要超时触发降级
+  let 首次字节计时器 = null;
+  if (重试值) {
+    首次字节计时器 = setTimeout(() => {
+      if (!是否有数据 && !本地值276) {
+        本地值276 = true;
+        try {
+          远程套接字.close && 远程套接字.close();
+        } catch (忽略值275) {}
+        重试值();
+      }
+    }, 首字节超时);
+  }
+  const 本地值274 = 创建值值(网页套接字278);
+  let 读取器273 = null;
+  let 本地值272 = true;
+  let 缓冲271 = new ArrayBuffer(传输块大小);
+  try {
+    try {
+      读取器273 = 远程套接字.readable.getReader({
+        mode: 'byob'
+      });
+    } catch (忽略值270) {
+      本地值272 = false;
+      读取器273 = 远程套接字.readable.getReader();
+    }
+    for (;;) {
+      const 结果269 = 本地值272 ? await 读取器273.read(new Uint8Array(缓冲271, 0, 传输块大小)) : await 读取器273.read();
+      if (结果269.done) break;
+      const 读取值 = 结果269.value;
+      let 块268 = 处理值值8数组(读取值);
+      const 值缓冲 = 本地值272 && 读取值?.buffer instanceof ArrayBuffer && 读取值.buffer.byteLength >= 传输块大小 ? 读取值.buffer : new ArrayBuffer(传输块大小);
+      if (!块268.byteLength) continue;
+      if (!是否有数据) {
+        是否有数据 = true;
+        if (首次字节计时器) {
+          clearTimeout(首次字节计时器);
+          首次字节计时器 = null;
+        }
+      }
+      if (网页套接字278.readyState !== 1) throw new Error(错误_网页套接字未打开);
+      if (头部277) {
+        块268 = 拼接值8数组(头部277, 块268);
+        头部277 = null;
+      }
+      if (块268.byteLength >= 传输块大小 >> 1) {
+        本地值274.flush();
+        网页套接字278.send(块268);
+        if (本地值272) 缓冲271 = new ArrayBuffer(传输块大小);
+      } else {
+        本地值274.send(块268.slice());
+        if (本地值272) 缓冲271 = 值缓冲;
+      }
+    }
+    本地值274.flush();
+  } catch (错误267) {
+    // 已经触发 retry 时不要关闭 WS（retry 会重新挂载新 socket）
+    if (!本地值276) 关闭套接字值(网页套接字278);
+  } finally {
+    try {
+      本地值274.flush();
+    } catch (忽略值266) {}
+    try {
+      读取器273?.releaseLock();
+    } catch (忽略值265) {}
+  }
+  if (首次字节计时器) {
+    clearTimeout(首次字节计时器);
+    首次字节计时器 = null;
+  }
+  if (!是否有数据 && !本地值276 && 重试值) 重试值();
+}
+async function 处理值用户数据报(用户数据报块, 网页套接字, 值头部, 请求值 = null) {
+  try {
+    const 值套接字 = await 连接值套接字('8.8.4.4', 53, 请求值, 1);
+    let 头部 = 值头部;
+    const 写入器264 = 值套接字.writable.getWriter();
+    await 写入器264.write(用户数据报块);
+    写入器264.releaseLock();
+    await 连接值279(值套接字, 网页套接字, 头部, null);
+  } catch (错误263) {}
+}
+async function 处理值代理连接(地址类型, 地址262, 端口261, 代理配置 = 已解析代理5配置, 请求值258 = null, 首包数据 = null) {
+  // 按代理种类分派：隧道走建隧请求，其余保持套接字5 握手
+  if (代理配置 && (代理配置.kind === 代理种类_隧道 || 代理配置.kind === 代理种类_安全隧道)) {
+    return 处理值隧道连接(地址262, 端口261, 代理配置, 请求值258, 首包数据);
+  }
+  const {
+    username: 本地值260,
+    password: 密码259,
+    hostname: 主机名258,
+    socksPort: 代理端口257
+  } = 代理配置;
+  // 优先用请求自带的 fetcher 建连，回退到全局连接
+  const 套接字256 = 处理打开值套接字(主机名258, 代理端口257, 请求值258);
+  const 写入器255 = 套接字256.writable.getWriter();
+  await 写入器255.write(new Uint8Array(本地值260 ? [5, 2, 0, 2] : [5, 1, 0]));
+  const 读取器254 = 套接字256.readable.getReader();
+  // 响应可能分片到达，按需累积到足够长度再解析；残留字节留给下一步
+  let 残留字节 = new Uint8Array(0);
+  async function 读满(需要长度) {
+    while (残留字节.length < 需要长度) {
+      const { value: 分片, done: 已结束 } = await 读取器254.read();
+      if (已结束 || !分片) throw new Error(错误_代理连接失败);
+      残留字节 = 拼接值8数组(残留字节, 分片);
+    }
+    return 残留字节;
+  }
+  function 取走(长度) {
+    const 结果 = 残留字节.subarray(0, 长度);
+    残留字节 = 残留字节.subarray(长度);
+    return 结果;
+  }
+  let 本地值253 = await 读满(2);
+  if (本地值253[0] !== 5 || 本地值253[1] === 255) throw new Error(错误_代理无可用方法);
+  const 选中方法 = 本地值253[1];
+  取走(2);
+  if (选中方法 === 2) {
+    if (!本地值260 || !密码259) throw new Error(错误_代理需要认证);
+    const 编码器252 = new TextEncoder();
+    const 认证请求 = new Uint8Array([1, 本地值260.length, ...编码器252.encode(本地值260), 密码259.length, ...编码器252.encode(密码259)]);
+    await 写入器255.write(认证请求);
+    本地值253 = await 读满(2);
+    if (本地值253[0] !== 1 || 本地值253[1] !== 0) throw new Error(错误_代理认证失败);
+    取走(2);
+  }
+  // 统一用域名型寻址：调用方的地址类型编号在不同协议下含义不一致（值协议 2=域名，
+  // 木马协议 3=域名），按编号分支会把域名当成六版地址编错。交给代理自己解析更稳。
+  const 编码器251 = new TextEncoder();
+  const 目标字节 = 编码器251.encode(规范化目标地址(地址262));
+  const 本地值250 = new Uint8Array([3, 目标字节.length, ...目标字节]);
+  await 写入器255.write(new Uint8Array([5, 1, 0, ...本地值250, 端口261 >> 8, 端口261 & 255]));
+  // 连接应答长度随绑定地址类型而变，先读固定的 4 字节头再按类型补齐
+  本地值253 = await 读满(4);
+  if (本地值253[1] !== 0) throw new Error(错误_代理连接失败);
+  const 绑定地址类型 = 本地值253[3];
+  let 应答长度;
+  if (绑定地址类型 === 1) {
+    应答长度 = 10;
+  } else if (绑定地址类型 === 4) {
+    应答长度 = 22;
+  } else if (绑定地址类型 === 3) {
+    应答长度 = 7 + (await 读满(5))[4];
+  } else {
+    throw new Error(错误_代理响应异常);
+  }
+  await 读满(应答长度);
+  取走(应答长度);
+  // 首包必须在释放写入器之前发出，与握手共用同一个写入器
+  if (首包数据 && 首包数据.byteLength) await 写入器255.write(首包数据);
+  写入器255.releaseLock();
+  读取器254.releaseLock();
+  // 应答之后若已捎带目标数据，重新挂回流首部，避免丢首包
+  if (残留字节.length) return 包装残留套接字(套接字256, 残留字节);
+  return 套接字256;
+}
+// 六版地址在域名型寻址里不带方括号
+function 规范化目标地址(地址234值) {
+  const 文本 = String(地址234值 || '');
+  return /^\[.*\]$/.test(文本) ? 文本.slice(1, -1) : 文本;
+}
+async function 处理值隧道连接(地址238值, 端口237值, 代理配置, 请求值236值 = null, 首包数据235值 = null) {
+  const {
+    username: 隧道用户,
+    password: 隧道密码,
+    hostname: 隧道主机,
+    socksPort: 隧道端口,
+    kind: 隧道种类
+  } = 代理配置;
+  const 连接选项 = 隧道种类 === 代理种类_安全隧道 ? {
+    secureTransport: 'on',
+    allowHalfOpen: false
+  } : undefined;
+  const 目标参数 = {
+    hostname: 隧道主机,
+    port: 隧道端口
+  };
+  // 优先用请求自带的 fetcher 建连，回退到全局连接
+  const 套接字 = 请求值236值 && typeof 请求值236值.connect === 'function' ? (连接选项 === undefined ? 请求值236值.connect(目标参数) : 请求值236值.connect(目标参数, 连接选项)) : 连接(目标参数, 连接选项);
+  if (套接字?.opened) await 套接字.opened;
+  // IPv6 目标在请求行里要带方括号
+  const 目标主机 = 地址238值.includes(':') && !/^\[.*\]$/.test(地址238值) ? `[${地址238值}]` : 地址238值;
+  const 目标地址 = `${目标主机}:${端口237值}`;
+  let 请求头 = `${文本_连接方法} ${目标地址}${文本_协议版本}${文本_换行}` + `${文本_主机头}${目标地址}${文本_换行}` + `${文本_用户代理头}${文本_换行}` + `${文本_代理保持}${文本_换行}`;
+  if (隧道用户) {
+    请求头 += `${文本_代理认证头}${btoa(`${隧道用户}:${隧道密码 || ''}`)}${文本_换行}`;
+  }
+  请求头 += 文本_换行;
+  const 写入器 = 套接字.writable.getWriter();
+  const 读取器 = 套接字.readable.getReader();
+  try {
+    await 写入器.write(new TextEncoder().encode(请求头));
+    // 响应可能分片到达，累积到头部结束（空行）为止
+    const 分隔 = [13, 10, 13, 10];
+    let 缓冲 = new Uint8Array(0);
+    let 头部结束 = -1;
+    while (头部结束 < 0) {
+      const {
+        value: 分片,
+        done: 已结束
+      } = await 读取器.read();
+      if (已结束 || !分片) throw new Error(错误_代理隧道失败);
+      缓冲 = 拼接值8数组(缓冲, 分片);
+      for (let 位置 = 0; 位置 + 3 < 缓冲.length; 位置++) {
+        if (缓冲[位置] === 分隔[0] && 缓冲[位置 + 1] === 分隔[1] && 缓冲[位置 + 2] === 分隔[2] && 缓冲[位置 + 3] === 分隔[3]) {
+          头部结束 = 位置 + 4;
+          break;
+        }
+      }
+      if (头部结束 < 0 && 缓冲.length > 8192) throw new Error(错误_代理响应异常);
+    }
+    const 状态行 = 共享解码器.decode(缓冲.subarray(0, Math.min(头部结束, 128)));
+    if (!状态行.startsWith(文本_响应前缀)) throw new Error(错误_代理响应异常);
+    const 状态码 = Number(状态行.split(' ')[1]);
+    if (!(状态码 >= 200 && 状态码 < 300)) throw new Error(错误_代理隧道失败);
+    // 代理在头部之后可能已经捎带了目标数据，需要交还给下游
+    const 残留数据 = 缓冲.subarray(头部结束);
+    // 首包在释放写入器之前发出
+    if (首包数据235值 && 首包数据235值.byteLength) await 写入器.write(首包数据235值);
+    写入器.releaseLock();
+    读取器.releaseLock();
+    if (残留数据.byteLength) return 包装残留套接字(套接字, 残留数据);
+    return 套接字;
+  } catch (隧道错误) {
+    try {
+      写入器.releaseLock();
+    } catch (忽略隧道1) {}
+    try {
+      读取器.releaseLock();
+    } catch (忽略隧道2) {}
+    try {
+      套接字.close();
+    } catch (忽略隧道3) {}
+    throw 隧道错误;
+  }
+}
+// 把建隧响应里捎带的目标数据重新挂回可读流首部
+function 包装残留套接字(套接字, 残留数据) {
+  let 上游读取器 = null;
+  const 新可读 = new ReadableStream({
+    start(控制器) {
+      控制器.enqueue(残留数据);
+      上游读取器 = 套接字.readable.getReader();
+    },
+    async pull(控制器) {
+      const {
+        value: 分片,
+        done: 已结束
+      } = await 上游读取器.read();
+      if (已结束) {
+        控制器.close();
+        return;
+      }
+      控制器.enqueue(分片);
+    },
+    cancel(原因) {
+      try {
+        上游读取器?.cancel(原因);
+      } catch (忽略取消) {}
+    }
+  });
+  return {
+    readable: 新可读,
+    writable: 套接字.writable,
+    closed: 套接字.closed,
+    opened: 套接字.opened,
+    close: () => 套接字.close()
+  };
+}
+function 解析代理配置(地址249) {
+  let 剩余地址 = String(地址249 || '').trim();
+  // 按前缀识别代理种类，无前缀保持原有行为（套接字5）
+  let 代理种类 = 代理种类_套接字5;
+  const 小写地址 = 剩余地址.toLowerCase();
+  if (小写地址.startsWith(前缀_安全超文本)) {
+    代理种类 = 代理种类_安全隧道;
+    剩余地址 = 剩余地址.slice(前缀_安全超文本.length);
+  } else if (小写地址.startsWith(前缀_超文本)) {
+    代理种类 = 代理种类_隧道;
+    剩余地址 = 剩余地址.slice(前缀_超文本.length);
+  } else if (小写地址.startsWith(前缀_套接字5)) {
+    剩余地址 = 剩余地址.slice(前缀_套接字5.length);
+  } else if (小写地址.startsWith(前缀_套接字)) {
+    剩余地址 = 剩余地址.slice(前缀_套接字.length);
+  }
+  // 去掉可能存在的尾部路径，只留 认证@主机:端口
+  const 路径位置 = 剩余地址.indexOf('/');
+  if (路径位置 >= 0) 剩余地址 = 剩余地址.slice(0, 路径位置);
+  if (!剩余地址) throw new Error(错误_无效代理地址);
+  let [本地值248, 本地值247] = 剩余地址.split("@").reverse();
+  let 本地值246, 密码245, 主机名244, 代理端口;
+  if (本地值247) {
+    const 本地值243 = 本地值247.split(":");
+    if (本地值243.length !== 2) throw new Error(错误_无效代理地址);
+    [本地值246, 密码245] = 本地值243;
+  }
+  const 本地值242 = 本地值248.split(":");
+  const 末段值 = 本地值242.pop();
+  代理端口 = Number(末段值);
+  // 隧道模式允许省略端口，按明文 80 / 安全 443 兜底
+  if (isNaN(代理端口)) {
+    if (代理种类 === 代理种类_套接字5) throw new Error(错误_无效代理地址);
+    本地值242.push(末段值);
+    代理端口 = 代理种类 === 代理种类_安全隧道 ? 443 : 80;
+  }
+  主机名244 = 本地值242.join(":");
+  if (!主机名244) throw new Error(错误_无效代理地址);
+  if (主机名244.includes(":") && !/^\[.*\]$/.test(主机名244)) throw new Error(错误_无效代理地址);
+  return {
+    username: 本地值246,
+    password: 密码245,
+    hostname: 主机名244,
+    socksPort: 代理端口,
+    kind: 代理种类
+  };
+}
+async function 处理订阅值(请求241, 用户240 = null) {
+  if (!用户240) 用户240 = 认证令牌;
+  const 网址239 = new URL(请求241.url);
+  // 优先检查Cookie中的语言设置
+  const 凭据头部 = 请求241.headers.get('Cookie') || '';
+  let 语言来源凭据 = null;
+  if (凭据头部) {
+    const 本地值238 = 凭据头部.split(';').map(丙值237 => 丙值237.trim());
+    for (const 凭据 of 本地值238) {
+      if (凭据.startsWith('preferredLanguage=')) {
+        语言来源凭据 = 凭据.split('=')[1];
+        break;
+      }
+    }
+  }
+  let 是否值236 = false;
+  if (语言来源凭据 === 'fa' || 语言来源凭据 === 'fa-IR') {
+    是否值236 = true;
+  } else if (语言来源凭据 === 'zh' || 语言来源凭据 === 'zh-CN') {
+    是否值236 = false;
+  } else {
+    // 如果没有Cookie，使用浏览器语言检测
+    const 接受语言 = 请求241.headers.get('Accept-Language') || '';
+    const 浏览器语言 = 接受语言.split(',')[0].split('-')[0].toLowerCase();
+    是否值236 = 浏览器语言 === 'fa' || 接受语言.includes('fa-IR') || 接受语言.includes('fa');
+  }
+  const 语言值 = 是否值236 ? 'fa-IR' : 'zh-CN';
+  const 本地值235 = {
+    zh: {
+      title: 解码64('6K6i6ZiF5Lit5b+D'),
+      subtitle: '多客户端支持 • 智能优选 • 一键生成',
+      selectClient: '[ 选择客户端 ]',
+      systemStatus: '[ 系统状态 ]',
+      configManagement: '[ 配置管理 ]',
+      relatedLinks: '[ 相关链接 ]',
+      checking: '检测中...',
+      workerRegion: 'Worker地区: ',
+      detectionMethod: '检测方式: ',
+      proxyIPStatus: 解码64('UHJveHlJUOeKtuaAgTog'),
+      currentIP: '当前使用IP: ',
+      regionMatch: '地区匹配: ',
+      selectionLogic: '选择逻辑: ',
+      kvStatusChecking: '检测KV状态中...',
+      kvEnabled: '✅ KV存储已启用，可以使用配置管理功能',
+      kvDisabled: '⚠️ KV存储未启用或未配置',
+      specifyRegion: '指定地区 (wk):',
+      autoDetect: 解码64('5a6Y5pa555u06L+e'),
+      saveRegion: '保存地区配置',
+      protocolSelection: 解码64('5Y2P6K6u6YCJ5oupOg=='),
+      enableProtoV: 解码64('5ZCv55SoIFZMRVNTIOWNj+iurg=='),
+      enableProtoT: 解码64('5ZCv55SoIFRyb2phbiDljY/orq4='),
+      enableXhttp: 解码64('5ZCv55SoIHhodHRwIOWNj+iurg=='),
+      altPassword: 解码64('VHJvamFuIOWvhueggSAo5Y+v6YCJKTo='),
+      customPath: '自定义路径 (d):',
+      customIP: 解码64('6Ieq5a6a5LmJUHJveHlJUCAocCk6'),
+      preferredIPs: '优选IP列表 (yx):',
+      preferredIPsURL: '优选IP来源URL (yxURL):',
+      latencyTest: '延迟测试',
+      latencyTestIP: '测试IP/域名:',
+      latencyTestIPPlaceholder: '输入IP或域名，多个用逗号分隔',
+      latencyTestPort: '端口:',
+      startTest: '开始测试',
+      stopTest: '停止测试',
+      testResult: '测试结果:',
+      addToYx: '添加到优选列表',
+      addSelectedToYx: '添加选中项到优选列表',
+      selectAll: '全选',
+      deselectAll: '取消全选',
+      testingInProgress: '测试中...',
+      testComplete: '测试完成',
+      latencyMs: '延迟',
+      timeout: '超时',
+      ipSource: 'IP来源:',
+      manualInput: '手动输入',
+      cfRandomIP: 'CF随机IP',
+      urlFetch: 'URL获取',
+      randomCount: '生成数量:',
+      fetchURL: '获取URL:',
+      fetchURLPlaceholder: '输入优选IP的URL地址',
+      generateIP: '生成IP',
+      fetchIP: '获取IP',
+      socks5Config: 解码64('5Luj55CG6YWN572uIChzKTo='),
+      customHomepage: '自定义首页URL (homepage):',
+      customHomepagePlaceholder: '例如: https://example.com',
+      customHomepageHint: '设置自定义URL作为首页伪装。访问根路径 / 时将显示该URL的内容。留空则显示默认终端页面。',
+      saveConfig: '保存配置',
+      advancedControl: '高级控制',
+      subscriptionConverter: 解码64('6K6i6ZiF6L2s5o2i5Zyw5Z2AOg=='),
+      builtinPreferred: '内置优选类型:',
+      enablePreferredDomain: '启用优选域名',
+      enablePreferredIP: '启用优选 IP',
+      enableNativeAddress: '启用原生地址',
+      enableGitHubPreferred: '启用自定义优选',
+      jkSection: '家宽链式',
+      jkEnable: '开启家宽链式',
+      jkHint: 解码64('5byA5LqG5LmL5ZCO5a6i5oi356uv5YiX6KGo5aSa5LiA5Liq44CMQ0xBU0gg5a625a6944CN44CCQ0Yg6IqC54K55bim6Lev77yM5Ye65Y+j5o2i5oiQ5pel5pys44CB6Z+p5Zu9562J5Zyw55qE5a625bqt5a695bim44CC6KaBIENsYXNoIE1ldGEg5YaF5qC4IDEuMTkuMjUg5Lul5LiK5omN6K6k77yMQ2xhc2ggVmVyZ2UgUmV244CBRmxDbGFzaOOAgUNNRkEg6YO96KGM44CC6IqC54K55piv572R5Y+L5YWx5Lqr55qE77yM5pe25LiN5pe25Lya5o6J77yM6K6i6ZiF6YeM5Lya6Ieq5bex5o2i44CC'),
+      jkClient: 'CLASH 家宽',
+      allowAPIManagement: '允许API管理 (ae):',
+      regionMatching: '地区匹配 (rm):',
+      downgradeControl: 解码64('5Ye656uZ5pa55byPIChxaik6'),
+      tlsControl: 'TLS控制 (dkby):',
+      preferredControl: '优选控制 (yxby):',
+      saveAdvanced: '保存高级配置',
+      loading: '加载中...',
+      currentConfig: '📍 当前路径配置',
+      refreshConfig: '刷新配置',
+      resetConfig: '重置配置',
+      subscriptionCopied: 解码64('6K6i6ZiF6ZO+5o6l5bey5aSN5Yi2'),
+      autoSubscriptionCopied: 解码64('6Ieq5Yqo6K+G5Yir6K6i6ZiF6ZO+5o6l5bey5aSN5Yi277yM5a6i5oi356uv6K6/6Zeu5pe25Lya5qC55o2uVXNlci1BZ2VudOiHquWKqOivhuWIq+W5tui/lOWbnuWvueW6lOagvOW8jw=='),
+      altPasswordPlaceholder: '留空则自动使用 UUID',
+      altPasswordHint: 解码64('6K6+572u6Ieq5a6a5LmJIFRyb2phbiDlr4bnoIHjgILnlZnnqbrliJnkvb/nlKggVVVJROOAguWuouaIt+err+S8muiHquWKqOWvueWvhueggei/m+ihjCBTSEEyMjQg5ZOI5biM44CC'),
+      protocolHint: 解码64('5Y+v5Lul5ZCM5pe25ZCv55So5aSa5Liq5Y2P6K6u44CC6K6i6ZiF5bCG55Sf5oiQ6YCJ5Lit5Y2P6K6u55qE6IqC54K544CCPGJyPuKAoiBWTEVTUyBXUzog5Z+65LqOIFdlYlNvY2tldCDnmoTmoIflh4bljY/orq48YnI+4oCiIFRyb2phbjog5L2/55SoIFNIQTIyNCDlr4bnoIHorqTor4E8YnI+4oCiIHhodHRwOiDln7rkuo4gSFRUUCBQT1NUIOeahOS8quijheWNj+iuru+8iOmcgOimgee7keWumuiHquWumuS5ieWfn+WQjeW5tuW8gOWQryBnUlBD77yJ'),
+      enableECH: '启用 ECH (Encrypted Client Hello)',
+      enableECHHint: 解码64('5ZCv55So5ZCO77yM5q+P5qyh5Yi35paw6K6i6ZiF5pe25Lya6Ieq5Yqo5LuOIERvSCDojrflj5bmnIDmlrDnmoQgRUNIIOmFjee9ruW5tua3u+WKoOWIsOmTvuaOpeS4rQ=='),
+      customDNS: '自定义 DNS 服务器',
+      customDNSPlaceholder: '例如: https://223.5.5.5/dns-query',
+      customDNSHint: '用于ECH配置查询的DNS服务器地址（DoH格式）',
+      customECHDomain: '自定义 ECH 域名',
+      customECHDomainPlaceholder: '例如: cloudflare-ech.com',
+      customECHDomainHint: 'ECH配置中使用的域名，留空则使用默认值',
+      alpn: 'TLS ALPN',
+      alpnDefault: '默认（留空，由客户端协商）',
+      alpnHint: '仅添加到 TLS 节点链接参数；留空则不写 alpn。',
+      saveProtocol: 解码64('5L+d5a2Y5Y2P6K6u6YWN572u'),
+      subscriptionConverterPlaceholder: '默认: https://url.v1.mk/sub',
+      subscriptionConverterHint: 解码64('6K6i6ZiF6L2s5o2i5bey5YaF6YOo5a6e546w77yM5peg6ZyA5aSW6YOoIEFQSeOAguatpOmhueS7heS9nOWFvOWuueS/neeVme+8jOWPr+eVmeepuuOAgg=='),
+      builtinPreferredHint: 解码64('5o6n5Yi26K6i6ZiF5Lit5YyF5ZCr5ZOq5Lqb5YaF572u5LyY6YCJ6IqC54K544CC6buY6K6k5YWo6YOo5ZCv55So44CC'),
+      apiEnabledDefault: '默认（关闭API）',
+      apiEnabledYes: '开启API管理',
+      apiEnabledHint: '⚠️ 安全提醒：开启后允许通过API动态添加优选IP。建议仅在需要时开启。',
+      regionMatchingDefault: '默认（启用地区匹配）',
+      regionMatchingNo: '关闭地区匹配',
+      regionMatchingHint: '设置为"关闭"时不进行地区智能匹配',
+      downgradeControlDefault: 解码64('5LyY5YWI6LWw5Luj55CG77yI6buY6K6k77yJ'),
+      downgradeControlNo: 解码64('5LyY5YWI55u06L+e77yM5aSx6LSl5YaN6LWw5Luj55CG'),
+      downgradeControlOnly: 解码64('5Y+q6LWw5Luj55CG77yM5LiN5Zue6JC9'),
+      downgradeControlHint: 解码64('5rKh5aGr5Luj55CG5pe25LiJ5Liq6YCJ6aG56YO95LiA5qC377yM6YO95piv55u06L+e44CC5Y+q6LWw5Luj55CG5pe26L+e5LiN5LiK5bCx5pat5byA77yM5Ye65Y+jIElQIOS4jeS8mua8jw=='),
+      tlsControlDefault: '默认（保留所有节点）',
+      tlsControlYes: '仅TLS节点',
+      tlsControlHint: '设置为"仅TLS节点"时只生成带TLS的节点，不生成非TLS节点（如80端口）',
+      preferredControlDefault: '默认（启用优选）',
+      preferredControlYes: '关闭优选',
+      preferredControlHint: '设置为"关闭优选"时只使用原生地址，不生成优选IP和域名节点',
+      regionNames: {
+        CF: 解码64('8J+MkCDlrpjmlrnnm7Tov54='),
+        HK: '🇭🇰 香港',
+        US: '🇺🇸 美国',
+        SG: '🇸🇬 新加坡',
+        JP: '🇯🇵 日本',
+        KR: '🇰🇷 韩国',
+        DE: '🇩🇪 德国',
+        SE: '🇸🇪 瑞典',
+        NL: '🇳🇱 荷兰',
+        FI: '🇫🇮 芬兰',
+        GB: '🇬🇧 英国'
+      },
+      terminal: '终端 v3.1',
+      githubProject: 'GitHub 项目',
+      优选工具: '优选工具',
+      autoDetectClient: '自动识别',
+      selectionLogicText: '同地区 → 邻近地区 → 其他地区',
+      customIPDisabledHint: 解码64('5L2/55So6Ieq5a6a5LmJUHJveHlJUOaXtu+8jOWcsOWMuumAieaLqeW3suemgeeUqA=='),
+      customIPMode: 解码64('6Ieq5a6a5LmJUHJveHlJUOaooeW8jyAocOWPmOmHj+WQr+eUqCk='),
+      customIPModeDesc: '自定义IP模式 (已禁用地区匹配)',
+      usingCustomProxyIP: 解码64('5L2/55So6Ieq5a6a5LmJUHJveHlJUDog'),
+      customIPConfig: ' (p变量配置)',
+      customIPModeDisabled: '自定义IP模式，地区选择已禁用',
+      manualRegion: '手动指定地区',
+      manualRegionDesc: ' (手动指定)',
+      proxyIPAvailable: 解码64('MTAvMTAg5Y+v55SoIChQcm94eUlQ5Z+f5ZCN6aKE6K6+5Y+v55SoKQ=='),
+      smartSelection: '智能就近选择中',
+      sameRegionIP: '同地区IP可用 (1个)',
+      cloudflareDetection: 解码64('5a6Y5pa555u06L+e'),
+      detectionFailed: '检测失败',
+      apiTestResult: 'API检测结果: ',
+      apiTestTime: '检测时间: ',
+      apiTestFailed: 'API检测失败: ',
+      unknownError: '未知错误',
+      apiTestError: 'API测试失败: ',
+      kvNotConfigured: 'KV存储未配置，无法使用配置管理功能。\\n\\n请在Cloudflare Workers中:\\n1. 创建KV命名空间\\n2. 绑定环境变量 C\\n3. 重新部署代码',
+      kvNotEnabled: 'KV存储未配置',
+      kvCheckFailed: 'KV存储检测失败: 响应格式错误',
+      kvCheckFailedStatus: 'KV存储检测失败 - 状态码: ',
+      kvCheckFailedError: 'KV存储检测失败 - 错误: '
     },
     fa: {
-        welcome:
-            "🤖 **به ربات ترانزیت نهان خوش آمدید**\nجهت مدیریت سیستم نظارتی خود یکی از گزینه‌های زیر را انتخاب نمایید:",
-        status: "وضعیت سیستم",
-        users: "مدیریت مشترکین",
-        metrics: "سلامت درگاه شبکه",
-        panic: "وضعیت اضطراری (Panic)",
-        dash: "پنل تحت وب",
-        lang: "🌐 تغییر زبان به انگلیسی",
-        active: "🟢 فعال",
-        paused: "🔴 متوقف شده",
-        uptime: "زمان کارکرد",
-        streams: "📡 اتصالات فعال",
-        no_users: "هیچ مشترکی پیدا نشد.",
-        sub_info: "👤 مشخصات مشترک:",
-        name: "نام",
-        total: "درخواست کل",
-        daily: "درخواست روزانه",
-        expiry: "انقضاء",
-        days: "روزهای باقی‌مانده",
-        created: "تاریخ ایجاد",
-        unlimited: "نامحدود",
-        btn_back: "بازگشت",
-        btn_next: "بعدی",
-        btn_del: "حذف",
-        btn_pause: "غیرفعال‌سازی",
-        btn_resume: "فعال‌سازی",
-        btn_edit_name: "تغییر نام",
-        btn_edit_limits: "ویرایش محدودیت‌ها",
-        btn_add: "+ افزودن مشترک جدید",
-        btn_confirm: "تأیید",
-        btn_cancel: "انصراف",
-        msg_enter_name: "لطفاً نام یا شناسه مشترک جدید را ارسال نمایید:",
-        msg_added: "مشترک با موفقیت افزوده شد!",
-        msg_deleted: "مشترک با موفقیت حذف گردید!",
-        msg_panic: "وضعیت اضطراری فعال شد\nمسیر تصادفی شد و سیستم متوقف گردید.",
-        msg_invalid: "ورودی نامعتبر است. مجدداً تلاش نمایید.",
-        msg_enter_limits:
-            "فرمت ورودی محدودیت:\n`[کل] [روزانه] [مدت_روز]`\n(از 0 برای نامحدود استفاده کنید)\n\nمثال:\n`10000 500 30`",
-        msg_confirm_del: "آیا از حذف این مشترک اطمینان کامل دارید؟",
-        msg_confirm_panic:
-            "آیا از فعال‌سازی وضعیت اضطراری اطمینان دارید؟ کل اتصالات متوقف و آدرس‌ها منقضی خواهند شد!",
-        status_updated: "وضعیت بروزرسانی شد!",
-        access_denied: "دسترسی غیرمجاز. شما اجازه مدیریت این پنل را ندارید.",
-        dashboard: "داشبورد",
-        search: "جستجوی کاربر",
-        statistics: "آمار",
-        panel_info: "اطلاعات پنل",
-        disabled_users: "کاربران غیرفعال",
-        reset_traffic: "بازنشانی ترافیک",
-        extend_expiry: "تمدید انقضا",
-        notes: "یادداشت‌ها",
-        device_limit: "محدودیت کانفیگ",
-        msg_enter_search: "🔍 نام کاربری، UUID یا لینک اشتراک را ارسال کنید:",
-        msg_enter_notes: "📝 یادداشت برای این کاربر را ارسال کنید:",
-        msg_enter_extend_days: "📅 تعداد روزهای تمدید را وارد کنید:",
-        msg_traffic_reset: "ترافیک با موفقیت بازنشانی شد!",
-        msg_expiry_extended: "انقضا به مدت {days} روز تمدید شد!",
-        msg_no_disabled: "هیچ کاربر غیرفعالی یافت نشد.",
-        msg_enter_device_limit:
-            "محدودیت تعداد کانفیگ را وارد کنید (0 برای نامحدود):",
-        config_limit_updated: "محدودیت کانفیگ به‌روزرسانی شد!",
-        stats_title: "آمار پنل",
-        count_active: "فعال",
-        count_paused: "متوقف",
-        count_disabled: "غیرفعال خودکار",
-        dash_total: "کل کاربران",
-        dash_active: "فعال",
-        dash_paused: "متوقف",
-        dash_expired: "منقضی",
-        dash_auto_disabled: "غیرفعال خودکار",
-        btn_main_menu: "منوی اصلی",
-        btn_back_to_list: "بازگشت به لیست",
-        total_traffic: "ترافیک کل",
-        daily_traffic: "ترافیک روزانه",
-        lbl_status: "وضعیت",
-        lbl_subscription: "لینک اشتراک",
-        lbl_user_not_found: "⚠️ کاربر یافت نشد",
-        lbl_none: "ندارد",
-        lbl_page: "صفحه",
-        select_panel: "🔌 کدام پنل را می‌خواهید مدیریت کنید؟",
-        current_panel: "پنل فعلی",
-        switch_panel: "🔄 تغییر پنل",
-        panel_local: "🏠 این پنل",
-        panel_remote: "🌐",
-        msg_panel_selected: "پنل انتخاب شد! ✅",
-        msg_panel_error: "❌ اتصال به پنل انتخابی ناموفق بود.",
-        msg_panel_unreachable:
-            "⚠️ پنل در دسترس نیست. لطفاً پیکربندی را بررسی کنید.",
-        btn_sub_link: "لینک اشتراک",
-        sub_link_sent: "لینک اشتراک ارسال شد!",
-        btn_update_usage: "بروزرسانی مصرف",
-        tg_settings: "تنظیمات",
-        tg_advanced: "پیشرفته",
-        tg_logs: "گزارش‌ها",
-        tg_sys_settings: "تنظیمات سیستم",
-        tg_adv_settings: "تنظیمات پیشرفته",
-        tg_logs_view: "مشاهده گزارش‌ها",
-        tg_logs_clear: "پاک کردن گزارش‌ها",
-        tg_proto: "پروتکل",
-        tg_ports: "پورت‌ها",
-        tg_uuid: "شناسه دستگاه",
-        tg_path: "مسیر API",
-        tg_pass: "کلید اصلی",
-        tg_dns: "DNS",
-        tg_relay: "آی‌پی رله",
-        tg_maintenance: "سایت استتار",
-        tg_tfo: "TCP Fast Open",
-        tg_ech: "ECH",
-        tg_silent: "هشدار خاموش",
-        tg_pause: "کلید توقف",
-        tg_auto_update: "بروزرسانی خودکار",
-        tg_direct: "کانفیگ مستقیم",
-        tg_nat64: "NAT64",
-        tg_clean_ips: "آی‌پی تمیز",
-        tg_nodes: "نودها",
-        tg_strategy: "روش نام‌گذاری",
-        tg_prefix: "پیشوند",
-        tg_fake_entries: "ورودی‌های اشتراک",
-        tg_cf_settings: "تنظیمات کلودفلر",
-        tg_tg_settings: "تنظیمات تلگرام",
-        tg_backup: "پشتیبان‌گیری",
-        tg_restore: "بازیابی",
-        tg_current_val: "مقدار فعلی",
-        tg_new_val: "مقدار جدید را ارسال کنید:",
-        tg_saved: "ذخیره شد!",
-        tg_cancelled: "لغو شد",
-        tg_log_entry: "",
-        tg_log_empty: "گزارشی ثبت نشده",
-        tg_u_custom_name: "نام سفارشی",
-        tg_u_clean_ips: "آی‌پی تمیز",
-        tg_u_proxy_ips: "آی‌پی پروکسی",
-        tg_u_nodes: "نودها",
-        tg_u_nat64: "NAT64",
-        tg_u_mode: "پروتکل",
-        tg_u_ports: "پورت‌ها",
-        tg_u_conn_limit: "محدودیت اتصال",
-        tg_u_panel_url: "آدرس پنل",
-        tg_u_max_cfg: "حداکثر کانفیگ",
-        tg_u_all: "همه تنظیمات",
-        tg_network: "شبکه",
-        tg_uptime: "زمان کارکرد",
-        tg_conns: "اتصالات فعال",
-        tg_version: "نسخه",
-        tg_cf_usage: "مصرف کلودفلر",
-    },
+      title: 'مرکز اشتراک',
+      subtitle: 'پشتیبانی چند کلاینت • انتخاب هوشمند • تولید یک کلیکی',
+      selectClient: '[ انتخاب کلاینت ]',
+      systemStatus: '[ وضعیت سیستم ]',
+      configManagement: '[ مدیریت تنظیمات ]',
+      relatedLinks: '[ لینک‌های مرتبط ]',
+      checking: 'در حال بررسی...',
+      workerRegion: 'منطقه Worker: ',
+      detectionMethod: 'روش تشخیص: ',
+      proxyIPStatus: 解码64('2YjYtti524zYqiBQcm94eUlQOiA='),
+      currentIP: 'IP فعلی: ',
+      regionMatch: 'تطبیق منطقه: ',
+      selectionLogic: 'منطق انتخاب: ',
+      kvStatusChecking: 'در حال بررسی وضعیت KV...',
+      kvEnabled: '✅ ذخیره‌سازی KV فعال است، می‌توانید از مدیریت تنظیمات استفاده کنید',
+      kvDisabled: '⚠️ ذخیره‌سازی KV فعال نیست یا پیکربندی نشده است',
+      specifyRegion: 'تعیین منطقه (wk):',
+      autoDetect: 'اتصال مستقیم رسمی',
+      saveRegion: 'ذخیره تنظیمات منطقه',
+      protocolSelection: 'انتخاب پروتکل:',
+      enableProtoV: 解码64('2YHYudin2YTigIzYs9in2LLbjCDZvtix2YjYqtqp2YQgVkxFU1M='),
+      enableProtoT: 解码64('2YHYudin2YTigIzYs9in2LLbjCDZvtix2YjYqtqp2YQgVHJvamFu'),
+      enableXhttp: 'فعال‌سازی پروتکل xhttp',
+      enableECH: 'فعال‌سازی ECH (Encrypted Client Hello)',
+      enableECHHint: 'پس از فعال‌سازی، در هر بار تازه‌سازی اشتراک، پیکربندی ECH به‌روز به‌طور خودکار از DoH دریافت شده و به لینک‌ها اضافه می‌شود',
+      customDNS: 'سرور DNS سفارشی',
+      customDNSPlaceholder: 'مثال: https://223.5.5.5/dns-query',
+      customDNSHint: 'آدرس سرور DNS برای جستجوی پیکربندی ECH (فرمت DoH)',
+      customECHDomain: 'دامنه ECH سفارشی',
+      customECHDomainPlaceholder: 'مثال: cloudflare-ech.com',
+      customECHDomainHint: 'دامنه استفاده شده در پیکربندی ECH، خالی بگذارید تا از مقدار پیش‌فرض استفاده شود',
+      altPassword: 解码64('2LHZhdiyINi52KjZiNixIFRyb2phbiAo2KfYrtiq24zYp9ix24wpOg=='),
+      customPath: 'مسیر سفارشی (d):',
+      customIP: 解码64('UHJveHlJUCDYs9mB2KfYsdi024wgKHApOg=='),
+      preferredIPs: 'لیست IP ترجیحی (yx):',
+      preferredIPsURL: 'URL منبع IP ترجیحی (yxURL):',
+      latencyTest: 'تست تاخیر',
+      latencyTestIP: 'IP/دامنه تست:',
+      latencyTestIPPlaceholder: 'IP یا دامنه وارد کنید، چند مورد با کاما جدا شوند',
+      latencyTestPort: 'پورت:',
+      startTest: 'شروع تست',
+      stopTest: 'توقف تست',
+      testResult: 'نتیجه تست:',
+      addToYx: 'افزودن به لیست ترجیحی',
+      addSelectedToYx: 'افزودن موارد انتخاب شده',
+      selectAll: 'انتخاب همه',
+      deselectAll: 'لغو انتخاب',
+      testingInProgress: 'در حال تست...',
+      testComplete: 'تست کامل شد',
+      latencyMs: 'تاخیر',
+      timeout: 'زمان تمام شد',
+      ipSource: 'منبع IP:',
+      manualInput: 'ورودی دستی',
+      cfRandomIP: 'IP تصادفی CF',
+      urlFetch: 'دریافت از URL',
+      randomCount: 'تعداد تولید:',
+      fetchURL: 'URL دریافت:',
+      fetchURLPlaceholder: 'آدرس URL لیست IP را وارد کنید',
+      generateIP: 'تولید IP',
+      fetchIP: 'دریافت IP',
+      socks5Config: 解码64('2KrZhti424zZhdin2Kog2b7YsdmI2qnYs9uMIChzKTo='),
+      customHomepage: 'URL صفحه اصلی سفارشی (homepage):',
+      customHomepagePlaceholder: 'مثال: https://example.com',
+      customHomepageHint: 'تنظیم URL سفارشی به عنوان استتار صفحه اصلی. هنگام دسترسی به مسیر اصلی / محتوای این URL نمایش داده می‌شود. اگر خالی بگذارید صفحه ترمینال پیش‌فرض نمایش داده می‌شود.',
+      saveConfig: 'ذخیره تنظیمات',
+      advancedControl: 'کنترل پیشرفته',
+      subscriptionConverter: 'آدرس تبدیل اشتراک:',
+      builtinPreferred: 'نوع ترجیحی داخلی:',
+      enablePreferredDomain: 'فعال‌سازی دامنه ترجیحی',
+      enablePreferredIP: 'فعال‌سازی IP ترجیحی',
+      enableNativeAddress: 'فعال‌سازی آدرس اصلی',
+      enableGitHubPreferred: 'فعال‌سازی ترجیح سفارشی',
+      jkSection: 'زنجیره اینترنت خانگی',
+      jkEnable: 'فعال‌سازی زنجیره اینترنت خانگی',
+      jkHint: 解码64('2b7YsyDYp9iyINmB2LnYp9mE4oCM2LPYp9iy24zYjCDar9iy24zZhtmHIMKrQ0xBU0gg2K7Yp9mG2q/bjMK7INio2Ycg2YHZh9ix2LPYqiDaqdmE2KfbjNmG2KrigIzZh9inINin2LbYp9mB2Ycg2YXbjOKAjNi02YjYry4g2q/YsdmH4oCM2YfYp9uMIENGINmF2LPbjNixINix2Kcg2KjYp9iyINmF24zigIzaqdmG2YbYryDZiCDYrtix2YjYrNuMINin2LIg2KfbjNmG2KrYsdmG2Kog2K7Yp9mG2q/bjCDamNin2b7ZhtiMINqp2LHZhyDZiCDaqdi02YjYsdmH2KfbjCDYr9uM2q/YsSDYp9iz2KouINmB2YLYtyDZh9iz2KrZhyBDbGFzaCBNZXRhINmG2LPYrtmHIDEuMTkuMjUg2KjZhyDYqNin2YTYpyDYotmGINix2Kcg2YXbjOKAjNi02YbYp9iz2K/YmyBDbGFzaCBWZXJnZSBSZXbYjCBGbENsYXNoINmIIENNRkEg2qnYp9ixINmF24zigIzaqdmG2YbYry4g2q/YsdmH4oCM2YfYpyDYp9i02KrYsdin2qnbjCDZh9iz2KrZhtivINmIINqv2KfZh9uMINmC2LfYuSDZhduM4oCM2LTZiNmG2K/YjCDYp9i02KrYsdin2qkg2K7ZiNiv2LQg2q/YsdmHINiv24zar9ix24wg2LHYpyDYp9mG2KrYrtin2Kgg2YXbjOKAjNqp2YbYry4='),
+      jkClient: 'CLASH خانگی',
+      allowAPIManagement: 'اجازه مدیریت API (ae):',
+      regionMatching: 'تطبیق منطقه (rm):',
+      downgradeControl: 解码64('2LHZiNi0INiu2LHZiNisIChxaik6'),
+      tlsControl: 'کنترل TLS (dkby):',
+      preferredControl: 'کنترل ترجیحی (yxby):',
+      saveAdvanced: 'ذخیره تنظیمات پیشرفته',
+      loading: 'در حال بارگذاری...',
+      currentConfig: '📍 پیکربندی مسیر فعلی',
+      refreshConfig: 'تازه‌سازی تنظیمات',
+      resetConfig: 'بازنشانی تنظیمات',
+      subscriptionCopied: 'لینک اشتراک کپی شد',
+      autoSubscriptionCopied: 'لینک اشتراک تشخیص خودکار کپی شد، کلاینت هنگام دسترسی بر اساس User-Agent به طور خودکار تشخیص داده و قالب مربوطه را برمی‌گرداند',
+      altPasswordPlaceholder: 'خالی بگذارید تا از UUID استفاده شود',
+      altPasswordHint: 解码64('2LHZhdiyINi52KjZiNixIFRyb2phbiDYs9mB2KfYsdi024wg2LHYpyDYqtmG2LjbjNmFINqp2YbbjNivLiDYp9qv2LEg2K7Yp9mE24wg2Kjar9iw2KfYsduM2K8g2KfYsiBVVUlEINin2LPYqtmB2KfYr9mHINmF24zigIzYtNmI2K8uINqp2YTYp9uM2YbYqiDYqNmHINi32YjYsSDYrtmI2K/aqdin2LEg2LHZhdiyINi52KjZiNixINix2Kcg2KjYpyBTSEEyMjQg2YfYtCDZhduM4oCM2qnZhtivLg=='),
+      protocolHint: 解码64('2YXbjOKAjNiq2YjYp9mG24zYryDahtmG2K/bjNmGINm+2LHZiNiq2qnZhCDYsdinINmH2YXYstmF2KfZhiDZgdi52KfZhCDaqdmG24zYry4g2KfYtNiq2LHYp9qpINqv2LHZh+KAjNmH2KfbjCDZvtix2YjYqtqp2YTigIzZh9in24wg2KfZhtiq2K7Yp9ioINi02K/ZhyDYsdinINiq2YjZhNuM2K8g2YXbjOKAjNqp2YbYry48YnI+4oCiIFZMRVNTIFdTOiDZvtix2YjYqtqp2YQg2KfYs9iq2KfZhtiv2KfYsdivINmF2KjYqtmG24wg2KjYsSBXZWJTb2NrZXQ8YnI+4oCiIFRyb2phbjog2KfYrdix2KfYsiDZh9mI24zYqiDYqNinINix2YXYsiDYudio2YjYsSBTSEEyMjQ8YnI+4oCiIHhodHRwOiDZvtix2YjYqtqp2YQg2KfYs9iq2KrYp9ixINmF2KjYqtmG24wg2KjYsSBIVFRQIFBPU1QgKNmG24zYp9iyINio2Ycg2KfYqti12KfZhCDYr9in2YXZhtmHINiz2YHYp9ix2LTbjCDZiCDZgdi52KfZhOKAjNiz2KfYstuMIGdSUEMg2K/Yp9ix2K8p'),
+      alpn: 'TLS ALPN',
+      alpnDefault: 'پیش‌فرض (خالی، مذاکره توسط کلاینت)',
+      alpnHint: 'فقط به لینک‌های TLS اضافه می‌شود؛ اگر خالی باشد alpn نوشته نمی‌شود.',
+      saveProtocol: 'ذخیره تنظیمات پروتکل',
+      subscriptionConverterPlaceholder: 'پیش‌فرض: https://url.v1.mk/sub',
+      subscriptionConverterHint: 'تبدیل اشتراک به صورت داخلی پیاده‌سازی شده است و نیازی به API خارجی ندارد. این فیلد فقط برای سازگاری حفظ شده و می‌توان آن را خالی گذاشت.',
+      builtinPreferredHint: 'کنترل اینکه کدام گره‌های ترجیحی داخلی در اشتراک گنجانده شوند. به طور پیش‌فرض همه فعال هستند.',
+      apiEnabledDefault: 'پیش‌فرض (بستن API)',
+      apiEnabledYes: 'فعال‌سازی مدیریت API',
+      apiEnabledHint: '⚠️ هشدار امنیتی: فعال‌سازی این گزینه اجازه می‌دهد IP های ترجیحی از طریق API به طور پویا اضافه شوند. توصیه می‌شود فقط در صورت نیاز فعال کنید.',
+      regionMatchingDefault: 'پیش‌فرض (فعال‌سازی تطبیق منطقه)',
+      regionMatchingNo: 'بستن تطبیق منطقه',
+      regionMatchingHint: 'وقتی "بستن" تنظیم شود، تطبیق هوشمند منطقه انجام نمی‌شود',
+      downgradeControlDefault: 解码64('2KfZiNmE2YjbjNiqINio2Kcg2b7YsdmI2qnYs9uMICjZvtuM2LTigIzZgdix2LYp'),
+      downgradeControlNo: 解码64('2KfZiNmE2YjbjNiqINio2Kcg2KfYqti12KfZhCDZhdiz2KrZgtuM2YXYjCDYr9ixINi12YjYsdiqINiu2LfYpyDZvtix2Yjaqdiz24w='),
+      downgradeControlOnly: 解码64('2YHZgti3INm+2LHZiNqp2LPbjNiMINio2K/ZiNmGINio2KfYstqv2LTYqg=='),
+      downgradeControlHint: 解码64('2Kfar9ixINm+2LHZiNqp2LPbjCDYqtmG2LjbjNmFINmG2LTYr9mHINio2KfYtNivINmH2LEg2LPZhyDar9iy24zZhtmHINuM2qnYs9in2YYg2Ygg2YXYs9iq2YLbjNmFINmH2LPYqtmG2K8uINiv2LEg2K3Yp9mE2Kog2YHZgti3INm+2LHZiNqp2LPbjNiMINin2KrYtdin2YQg2YbYp9mF2YjZgdmCINmC2LfYuSDZhduM4oCM2LTZiNivINmIIElQINiu2LHZiNis24wg2YHYp9i0INmG2YXbjOKAjNi02YjYrw=='),
+      tlsControlDefault: 'پیش‌فرض (حفظ همه گره‌ها)',
+      tlsControlYes: 'فقط گره‌های TLS',
+      tlsControlHint: 'وقتی "فقط گره‌های TLS" تنظیم شود، فقط گره‌های با TLS تولید می‌شوند، گره‌های غیر TLS (مانند پورت 80) تولید نمی‌شوند',
+      preferredControlDefault: 'پیش‌فرض (فعال‌سازی ترجیح)',
+      preferredControlYes: 'بستن ترجیح',
+      preferredControlHint: 'وقتی "بستن ترجیح" تنظیم شود، فقط از آدرس اصلی استفاده می‌شود، گره‌های IP و دامنه ترجیحی تولید نمی‌شوند',
+      regionNames: {
+        CF: '🌐 مستقیم رسمی',
+        HK: '🇭🇰 هنگ کنگ',
+        US: '🇺🇸 آمریکا',
+        SG: '🇸🇬 سنگاپور',
+        JP: '🇯🇵 ژاپن',
+        KR: '🇰🇷 کره جنوبی',
+        DE: '🇩🇪 آلمان',
+        SE: '🇸🇪 سوئد',
+        NL: '🇳🇱 هلند',
+        FI: '🇫🇮 فنلاند',
+        GB: '🇬🇧 بریتانیا'
+      },
+      terminal: 'ترمینال v3.1',
+      githubProject: 'پروژه GitHub',
+      优选工具: 'ابزار ترجیح IP',
+      autoDetectClient: 'تشخیص خودکار',
+      selectionLogicText: 'هم‌منطقه → منطقه مجاور → سایر مناطق',
+      customIPDisabledHint: 解码64('2YfZhtqv2KfZhSDYp9iz2KrZgdin2K/ZhyDYp9iyIFByb3h5SVAg2LPZgdin2LHYtNuM2Iwg2KfZhtiq2K7Yp9ioINmF2YbYt9mC2Ycg2LrbjNix2YHYudin2YQg2KfYs9iq'),
+      customIPMode: 解码64('2K3Yp9mE2KogUHJveHlJUCDYs9mB2KfYsdi024wgKNmF2KrYutuM2LEgcCDZgdi52KfZhCDYp9iz2Kop'),
+      customIPModeDesc: 'حالت IP سفارشی (تطبیق منطقه غیرفعال است)',
+      usingCustomProxyIP: 解码64('2KfYs9iq2YHYp9iv2Ycg2KfYsiBQcm94eUlQINiz2YHYp9ix2LTbjDog'),
+      customIPConfig: ' (پیکربندی متغیر p)',
+      customIPModeDisabled: 'حالت IP سفارشی، انتخاب منطقه غیرفعال است',
+      manualRegion: 'تعیین منطقه دستی',
+      manualRegionDesc: ' (تعیین دستی)',
+      proxyIPAvailable: 解码64('MTAvMTAg2K/YsSDYr9iz2KrYsdizICjYr9in2YXZhtmHINm+24zYtOKAjNmB2LHYtiBQcm94eUlQINiv2LEg2K/Ys9iq2LHYsyDYp9iz2Kop'),
+      smartSelection: 'انتخاب هوشمند نزدیک در حال انجام است',
+      sameRegionIP: 'IP هم‌منطقه در دسترس است (1)',
+      cloudflareDetection: 'اتصال مستقیم رسمی',
+      detectionFailed: 'تشخیص ناموفق',
+      apiTestResult: 'نتیجه تشخیص API: ',
+      apiTestTime: 'زمان تشخیص: ',
+      apiTestFailed: 'تشخیص API ناموفق: ',
+      unknownError: 'خطای ناشناخته',
+      apiTestError: 'تست API ناموفق: ',
+      kvNotConfigured: 'ذخیره‌سازی KV پیکربندی نشده است، نمی‌توانید از عملکرد مدیریت تنظیمات استفاده کنید.\\n\\nلطفا در Cloudflare Workers:\\n1. فضای نام KV ایجاد کنید\\n2. متغیر محیطی C را پیوند دهید\\n3. کد را دوباره مستقر کنید',
+      kvNotEnabled: 'ذخیره‌سازی KV پیکربندی نشده است',
+      kvCheckFailed: 'بررسی ذخیره‌سازی KV ناموفق: خطای فرمت پاسخ',
+      kvCheckFailedStatus: 'بررسی ذخیره‌سازی KV ناموفق - کد وضعیت: ',
+      kvCheckFailedError: 'بررسی ذخیره‌سازی KV ناموفق - خطا: '
+    }
+  };
+  const 翻译值 = 本地值235[是否值236 ? 'fa' : 'zh'];
+  const 值页面 = `<!DOCTYPE html>
+    <html lang="${语言值}" dir="${是否值236 ? 'rtl' : 'ltr'}">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${翻译值.title}</title>
+        <style>
+            :root {
+                --cp-bg: #05030e;
+                --cp-bg-2: #0a0820;
+                --cp-bg-3: #110835;
+                --cp-cyan: #00f0ff;
+                --cp-cyan-d: #00b8c4;
+                --cp-pink: #ff2bd6;
+                --cp-pink-d: #d1239f;
+                --cp-purple: #a347ff;
+                --cp-yellow: #fff200;
+                --cp-mint: #00ff9d;
+                --cp-amber: #ffb400;
+                --cp-red: #ff3860;
+                --cp-text: #e6f5ff;
+                --cp-text-dim: #7aa9c4;
+                --cp-border: rgba(0, 240, 255, 0.55);
+                --cp-border-pink: rgba(255, 43, 214, 0.55);
+                --cp-grid: rgba(255, 43, 214, 0.16);
+            }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html, body { min-height: 100%; }
+            body {
+                font-family: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+                background: radial-gradient(ellipse at 80% -10%, #2a0040 0%, var(--cp-bg) 50%, #000 100%);
+                color: var(--cp-text);
+                min-height: 100vh;
+                overflow-x: hidden;
+                position: relative;
+            }
+            body::before {
+                content: ""; position: fixed; inset: 0;
+                background-image:
+                    linear-gradient(var(--cp-grid) 1px, transparent 1px),
+                    linear-gradient(90deg, var(--cp-grid) 1px, transparent 1px);
+                background-size: 48px 48px;
+                mask-image: radial-gradient(ellipse at center, #000 30%, transparent 85%);
+                z-index: -3;
+                animation: cp-grid-slide 22s linear infinite;
+                pointer-events: none;
+            }
+            body::after {
+                content: ""; position: fixed; inset: 0;
+                background: repeating-linear-gradient(
+                    180deg,
+                    rgba(255,255,255,0.035) 0,
+                    rgba(255,255,255,0.035) 1px,
+                    transparent 1px,
+                    transparent 3px
+                );
+                pointer-events: none;
+                z-index: 6;
+                mix-blend-mode: overlay;
+                animation: cp-scan-flicker 6s infinite;
+            }
+            @keyframes cp-grid-slide {
+                0% { background-position: 0 0, 0 0; }
+                100% { background-position: 48px 48px, 48px 48px; }
+            }
+            @keyframes cp-scan-flicker {
+                0%, 100% { opacity: 0.55; }
+                50% { opacity: 0.85; }
+            }
+            .matrix-bg {
+                position: fixed; inset: 0;
+                background:
+                    radial-gradient(circle at 85% 15%, rgba(255,43,214,0.18) 0%, transparent 45%),
+                    radial-gradient(circle at 10% 85%, rgba(0,240,255,0.18) 0%, transparent 45%),
+                    radial-gradient(circle at 55% 50%, rgba(163,71,255,0.10) 0%, transparent 60%);
+                z-index: -2;
+                pointer-events: none;
+            }
+            .matrix-rain { display: none; }
+            .matrix-code-rain {
+                position: fixed; inset: 0;
+                pointer-events: none; z-index: -1;
+                overflow: hidden;
+            }
+            .matrix-column {
+                position: absolute; top: -120%; left: 0;
+                color: var(--cp-cyan);
+                font-family: "JetBrains Mono", "Courier New", monospace;
+                font-size: 14px; line-height: 1.25;
+                text-shadow: 0 0 6px var(--cp-cyan), 0 0 12px rgba(0,240,255,0.5);
+                animation: cp-drop linear infinite;
+            }
+            @keyframes cp-drop {
+                0%   { top: -120%; opacity: 0; }
+                10%  { opacity: 0.85; }
+                90%  { opacity: 0.4; }
+                100% { top: 110vh; opacity: 0; }
+            }
+            .matrix-column:nth-child(odd)  { animation-duration: 12s; }
+            .matrix-column:nth-child(even) { animation-duration: 18s; color: var(--cp-pink); text-shadow: 0 0 6px var(--cp-pink), 0 0 14px rgba(255,43,214,0.5); }
+            .matrix-column:nth-child(3n)   { animation-duration: 20s; color: var(--cp-purple); text-shadow: 0 0 6px var(--cp-purple); }
+            .matrix-column:nth-child(5n)   { animation-duration: 9s; opacity: 0.6; }
+
+            ::selection { background: var(--cp-pink); color: var(--cp-bg); }
+
+            .container {
+                max-width: 1180px;
+                margin: 0 auto;
+                padding: 110px 24px 60px;
+                position: relative;
+                z-index: 1;
+            }
+            .header {
+                text-align: center;
+                margin-bottom: 36px;
+                padding: 28px 24px;
+                position: relative;
+                border: 1px solid var(--cp-border);
+                background: linear-gradient(135deg, rgba(15,3,40,0.6), rgba(40,5,70,0.45));
+                clip-path: polygon(
+                    0 14px, 14px 0,
+                    calc(100% - 80px) 0, calc(100% - 60px) 14px,
+                    100% 14px, 100% calc(100% - 14px),
+                    calc(100% - 14px) 100%, 80px 100%,
+                    60px calc(100% - 14px), 0 calc(100% - 14px)
+                );
+                box-shadow: 0 0 30px rgba(0,240,255,0.25), 0 0 60px rgba(255,43,214,0.18);
+            }
+            .header::before {
+                content: "// SYS_ID / CFNEW / NIGHTCITY.NET";
+                position: absolute; top: 8px; left: 24px;
+                font-size: 10px; letter-spacing: 0.35em;
+                color: var(--cp-pink);
+                text-shadow: 0 0 6px var(--cp-pink);
+            }
+            .header::after {
+                content: "STATUS // ONLINE";
+                position: absolute; top: 8px; right: 24px;
+                font-size: 10px; letter-spacing: 0.35em;
+                color: var(--cp-mint);
+                text-shadow: 0 0 6px var(--cp-mint);
+            }
+            .title {
+                font-size: clamp(2.2rem, 5vw, 3.4rem);
+                font-weight: 800;
+                margin: 14px 0 8px;
+                color: var(--cp-cyan);
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                text-shadow:
+                    0 0 12px var(--cp-cyan),
+                    0 0 28px rgba(0,240,255,0.5),
+                    -2px 0 var(--cp-pink),
+                    2px 0 var(--cp-mint);
+                position: relative;
+                animation: cp-title-flicker 6s infinite;
+            }
+            @keyframes cp-title-flicker {
+                0%, 92%, 100% { opacity: 1; }
+                94%, 96% { opacity: 0.65; }
+            }
+            .subtitle {
+                color: var(--cp-text-dim);
+                margin-bottom: 0;
+                font-size: 0.95rem;
+                letter-spacing: 0.25em;
+                text-transform: uppercase;
+            }
+            .subtitle::before { content: "▸ "; color: var(--cp-pink); }
+
+            .card {
+                background:
+                    linear-gradient(180deg, rgba(8,4,28,0.85) 0%, rgba(15,3,40,0.78) 100%);
+                border: 1px solid var(--cp-border);
+                border-radius: 0;
+                padding: 26px 28px 28px;
+                margin-bottom: 22px;
+                position: relative;
+                backdrop-filter: blur(8px);
+                width: 100%;
+                box-shadow:
+                    0 0 0 1px rgba(255,43,214,0.18),
+                    0 0 22px rgba(0,240,255,0.18),
+                    0 0 60px rgba(255,43,214,0.06),
+                    inset 0 0 24px rgba(0,240,255,0.05);
+                clip-path: polygon(
+                    0 16px, 16px 0,
+                    calc(100% - 56px) 0, calc(100% - 40px) 16px,
+                    100% 16px, 100% calc(100% - 14px),
+                    calc(100% - 14px) 100%, 40px 100%,
+                    24px calc(100% - 14px), 0 calc(100% - 14px)
+                );
+            }
+            .card::after {
+                content: ""; position: absolute; top: 0; left: 0; right: 0;
+                height: 1px;
+                background: linear-gradient(90deg, transparent, var(--cp-pink), var(--cp-cyan), transparent);
+                opacity: 0.7;
+            }
+            .card-title {
+                font-size: 1.1rem;
+                margin: 0 0 20px;
+                color: var(--cp-cyan);
+                letter-spacing: 0.25em;
+                text-transform: uppercase;
+                text-shadow: 0 0 8px var(--cp-cyan);
+                display: flex; align-items: center; gap: 12px;
+                font-weight: 700;
+            }
+            .card-title::before {
+                content: ""; display: inline-block;
+                width: 14px; height: 14px;
+                background: var(--cp-pink);
+                box-shadow: 0 0 10px var(--cp-pink);
+                transform: rotate(45deg);
+            }
+            .card-title::after {
+                content: ""; flex: 1; height: 1px;
+                background: linear-gradient(90deg, var(--cp-cyan), transparent);
+                margin-left: 6px;
+            }
+            h3, h4 {
+                color: var(--cp-cyan);
+                letter-spacing: 0.18em;
+                text-transform: uppercase;
+                text-shadow: 0 0 6px var(--cp-cyan);
+                font-weight: 700;
+            }
+
+            .client-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 14px;
+                margin: 12px 0 18px;
+            }
+            .client-btn {
+                background: linear-gradient(135deg, rgba(0,240,255,0.08), rgba(255,43,214,0.08));
+                border: 1px solid var(--cp-border);
+                padding: 14px 18px;
+                color: var(--cp-cyan);
+                font-family: inherit;
+                font-weight: 700;
+                font-size: 0.85rem;
+                letter-spacing: 0.18em;
+                text-transform: uppercase;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                text-align: center;
+                position: relative;
+                overflow: hidden;
+                text-shadow: 0 0 6px var(--cp-cyan);
+                clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+            }
+            .client-btn::before {
+                content: ""; position: absolute; inset: 0; left: -100%;
+                background: linear-gradient(90deg, transparent, rgba(0,240,255,0.35), transparent);
+                transition: left 0.6s ease;
+            }
+            .client-btn:hover::before { left: 100%; }
+            .client-btn:hover {
+                color: var(--cp-pink);
+                border-color: var(--cp-pink);
+                background: linear-gradient(135deg, rgba(255,43,214,0.18), rgba(0,240,255,0.10));
+                box-shadow: 0 0 14px rgba(255,43,214,0.55), 0 0 28px rgba(0,240,255,0.30);
+                transform: translateY(-2px);
+                text-shadow: 0 0 8px var(--cp-pink);
+            }
+
+            #clientSubscriptionUrl,
+            .subscription-url,
+            [class*='subscription-url'],
+            [class*='c3Vic2NyaXB0aW9u'] {
+                background: rgba(0,0,0,0.7) !important;
+                border: 1px dashed var(--cp-pink) !important;
+                padding: 14px 16px !important;
+                word-break: break-all;
+                font-family: inherit;
+                color: var(--cp-mint) !important;
+                margin-top: 18px;
+                box-shadow: inset 0 0 12px rgba(255,43,214,0.18), 0 0 18px rgba(0,255,157,0.18) !important;
+                position: relative;
+                overflow-wrap: break-word;
+                overflow-x: auto;
+                max-width: 100%;
+                font-size: 0.85rem;
+                line-height: 1.6;
+                text-shadow: 0 0 6px var(--cp-mint);
+            }
+            #clientSubscriptionUrl:empty { display: none !important; }
+
+            .cp-hud {
+                position: fixed; top: 18px; right: 22px;
+                color: var(--cp-cyan);
+                font-family: "JetBrains Mono", monospace;
+                font-size: 11px; letter-spacing: 0.2em;
+                text-transform: uppercase;
+                text-align: right;
+                opacity: 0.85;
+                z-index: 1000;
+            }
+            .cp-hud .cp-hud-label { color: var(--cp-pink); }
+            .cp-hud .cp-hud-line { display: block; }
+            .cp-lang-wrapper {
+                position: fixed; top: 18px; left: 22px; z-index: 1000;
+                display: flex; align-items: center; gap: 10px;
+            }
+            .cp-lang-tag {
+                color: var(--cp-pink); font-size: 11px;
+                letter-spacing: 0.25em; text-transform: uppercase;
+                text-shadow: 0 0 6px var(--cp-pink);
+            }
+            #languageSelector {
+                background: rgba(8,4,28,0.85);
+                border: 1px solid var(--cp-cyan);
+                color: var(--cp-cyan);
+                padding: 6px 12px;
+                font-family: inherit;
+                font-size: 12px;
+                cursor: pointer;
+                letter-spacing: 0.12em;
+                text-shadow: 0 0 6px var(--cp-cyan);
+                box-shadow: 0 0 12px rgba(0,240,255,0.35);
+                clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+            }
+            #languageSelector option { background: var(--cp-bg-2); color: var(--cp-cyan); }
+
+            /* FX toggle - 页面特效图形化开关 */
+            .cp-fx-toggle {
+                position: fixed; top: 68px; left: 22px; z-index: 1001;
+                background: rgba(8,4,28,0.85);
+                border: 1px solid var(--cp-mint);
+                color: var(--cp-mint);
+                padding: 6px 12px;
+                font-family: inherit;
+                font-size: 11px;
+                letter-spacing: 0.18em;
+                text-transform: uppercase;
+                cursor: pointer;
+                text-shadow: 0 0 6px var(--cp-mint);
+                box-shadow: 0 0 10px rgba(0,255,157,0.35);
+                clip-path: polygon(7px 0, 100% 0, 100% calc(100% - 7px), calc(100% - 7px) 100%, 0 100%, 0 7px);
+                transition: all 0.2s ease;
+                display: inline-flex; align-items: center; gap: 6px;
+            }
+            .cp-fx-toggle:hover {
+                color: var(--cp-pink);
+                border-color: var(--cp-pink);
+                text-shadow: 0 0 8px var(--cp-pink);
+                box-shadow: 0 0 16px rgba(255,43,214,0.55);
+            }
+            .cp-fx-toggle .cp-fx-dot {
+                width: 6px; height: 6px;
+                background: var(--cp-mint);
+                border-radius: 50%;
+                box-shadow: 0 0 8px var(--cp-mint);
+                transition: all 0.2s;
+            }
+            body.fx-off .cp-fx-toggle {
+                color: var(--cp-text-dim);
+                border-color: var(--cp-text-dim);
+                text-shadow: none;
+                box-shadow: none;
+            }
+            body.fx-off .cp-fx-toggle .cp-fx-dot {
+                background: transparent;
+                border: 1px solid var(--cp-text-dim);
+                box-shadow: none;
+            }
+            /* FX OFF: 关闭所有装饰性特效，保留布局和配色 */
+            body.fx-off .matrix-bg,
+            body.fx-off .matrix-code-rain,
+            body.fx-off .matrix-column { display: none !important; }
+            body.fx-off::before,
+            body.fx-off::after { display: none !important; content: none !important; }
+            body.fx-off { background: var(--cp-bg) !important; }
+            body.fx-off * {
+                animation: none !important;
+                transition: color 0.15s, background-color 0.15s, border-color 0.15s, box-shadow 0.15s !important;
+            }
+            body.fx-off .cp-glitch::before,
+            body.fx-off .cp-glitch::after { display: none !important; }
+            body.fx-off .terminal-cursor::after,
+            body.fx-off .cp-fab-save .cp-fab-dot { animation: none !important; }
+            body.fx-off .cp-fab-save:hover { transform: none !important; }
+            body.fx-off .cp-action-bar.cp-dirty::before { animation: none !important; }
+            body.fx-off .header::before { display: none !important; }
+            body.fx-off .card { backdrop-filter: none !important; }
+            body.fx-off select, body.fx-off input, body.fx-off textarea { backdrop-filter: none !important; }
+
+            /* Status panel inside card */
+            #systemStatus {
+                background: linear-gradient(135deg, rgba(0,240,255,0.05), rgba(255,43,214,0.05)) !important;
+                border: 1px solid var(--cp-border) !important;
+                padding: 18px 20px !important;
+                margin: 14px 0 0 !important;
+                box-shadow: inset 0 0 16px rgba(0,240,255,0.12) !important;
+                position: relative;
+                clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+            }
+            #systemStatus > div {
+                color: var(--cp-text) !important;
+                text-shadow: none !important;
+                font-family: inherit !important;
+                margin: 6px 0 !important;
+                font-size: 0.85rem !important;
+                letter-spacing: 0.05em;
+            }
+            #systemStatus > div:first-child {
+                color: var(--cp-pink) !important;
+                font-weight: 700 !important;
+                letter-spacing: 0.25em !important;
+                text-shadow: 0 0 6px var(--cp-pink) !important;
+                margin-bottom: 14px !important;
+                text-transform: uppercase;
+            }
+
+            /* Force inputs / selects to cyberpunk */
+            input[type="text"], input[type="number"], input[type="password"],
+            select, textarea {
+                background: rgba(0,0,0,0.6) !important;
+                border: 1px solid var(--cp-border) !important;
+                color: var(--cp-cyan) !important;
+                font-family: inherit !important;
+                font-size: 13px !important;
+                padding: 10px 12px !important;
+                outline: none;
+                transition: border-color 0.2s, box-shadow 0.2s;
+                box-shadow: inset 0 0 8px rgba(0,240,255,0.08) !important;
+                letter-spacing: 0.04em;
+            }
+            input::placeholder { color: var(--cp-text-dim) !important; opacity: 0.7; }
+            input:focus, select:focus, textarea:focus {
+                border-color: var(--cp-pink) !important;
+                box-shadow: 0 0 0 1px var(--cp-pink), 0 0 14px rgba(255,43,214,0.4) !important;
+            }
+            select option { background: var(--cp-bg-2); color: var(--cp-cyan); }
+            input[type="checkbox"], input[type="radio"] {
+                accent-color: var(--cp-pink);
+            }
+
+            label {
+                color: var(--cp-cyan) !important;
+                letter-spacing: 0.05em;
+                text-shadow: 0 0 4px rgba(0,240,255,0.4);
+            }
+            label[style*="font-weight"], label[style*="bold"] {
+                font-weight: 700 !important;
+                color: var(--cp-pink) !important;
+                text-shadow: 0 0 6px var(--cp-pink) !important;
+                letter-spacing: 0.15em !important;
+                text-transform: uppercase;
+                font-size: 0.78rem !important;
+            }
+            small {
+                color: var(--cp-text-dim) !important;
+                font-size: 0.78rem !important;
+                letter-spacing: 0.04em;
+                line-height: 1.5;
+            }
+
+            /* Buttons inside forms - global override */
+            button, input[type="submit"] {
+                background: linear-gradient(135deg, rgba(0,240,255,0.15), rgba(255,43,214,0.15)) !important;
+                border: 1px solid var(--cp-border) !important;
+                color: var(--cp-cyan) !important;
+                font-family: inherit !important;
+                font-weight: 700 !important;
+                cursor: pointer;
+                padding: 10px 18px !important;
+                letter-spacing: 0.18em !important;
+                text-transform: uppercase;
+                font-size: 0.78rem !important;
+                text-shadow: 0 0 6px var(--cp-cyan) !important;
+                transition: all 0.25s ease;
+                clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+                box-shadow: 0 0 10px rgba(0,240,255,0.25);
+            }
+            button:hover, input[type="submit"]:hover {
+                color: var(--cp-pink) !important;
+                border-color: var(--cp-pink) !important;
+                box-shadow: 0 0 16px rgba(255,43,214,0.45), 0 0 32px rgba(0,240,255,0.20) !important;
+                transform: translateY(-1px);
+                text-shadow: 0 0 8px var(--cp-pink) !important;
+            }
+            button[id*="Reset"], button[onclick*="reset"], button[style*="ff0000"] {
+                color: var(--cp-red) !important;
+                border-color: var(--cp-red) !important;
+                text-shadow: 0 0 6px var(--cp-red) !important;
+                background: linear-gradient(135deg, rgba(255,56,96,0.15), rgba(255,43,214,0.10)) !important;
+            }
+            button[id*="Reset"]:hover, button[onclick*="reset"]:hover, button[style*="ff0000"]:hover {
+                box-shadow: 0 0 16px rgba(255,56,96,0.5) !important;
+            }
+            button[id="stopLatencyTest"] {
+                color: var(--cp-red) !important;
+                border-color: var(--cp-red) !important;
+            }
+
+            /* Form sub-cards */
+            .card form > div[style*="background: rgba(15, 3, 40"],
+            .card form > div[style*="background: rgba(20, 5, 50"],
+            div[style*="background: rgba(15, 3, 40"],
+            div[style*="background: rgba(20, 5, 50"] {
+                background: linear-gradient(135deg, rgba(0,240,255,0.04), rgba(255,43,214,0.04)) !important;
+                border: 1px solid var(--cp-border-pink) !important;
+                box-shadow: inset 0 0 12px rgba(255,43,214,0.06) !important;
+                border-radius: 0 !important;
+            }
+
+            /* kvStatus / statusMessage / currentConfig / pathTypeInfo */
+            #kvStatus, #statusMessage, #currentConfig, #pathTypeInfo {
+                background: rgba(0,0,0,0.55) !important;
+                border: 1px solid var(--cp-border) !important;
+                color: var(--cp-cyan) !important;
+                font-family: inherit !important;
+                box-shadow: inset 0 0 10px rgba(0,240,255,0.10) !important;
+                padding: 12px 14px !important;
+                font-size: 0.85rem !important;
+                letter-spacing: 0.04em;
+            }
+            #pathTypeInfo div:first-child {
+                color: var(--cp-pink) !important;
+                text-shadow: 0 0 6px var(--cp-pink) !important;
+                letter-spacing: 0.2em !important;
+            }
+
+            /* Latency Result list */
+            #latencyResultsList {
+                background: rgba(0,0,0,0.5) !important;
+                border: 1px solid var(--cp-border) !important;
+            }
+            #latencyResultsList > div {
+                border-bottom: 1px dashed rgba(0,240,255,0.18) !important;
+            }
+            #cityFilterContainer {
+                background: rgba(0,0,0,0.55) !important;
+                border: 1px solid var(--cp-border-pink) !important;
+            }
+
+            /* Related links area */
+            .card a {
+                color: var(--cp-cyan) !important;
+                text-decoration: none;
+                text-shadow: 0 0 6px var(--cp-cyan);
+                letter-spacing: 0.15em;
+                text-transform: uppercase;
+                font-size: 0.85rem;
+                padding: 4px 0;
+                border-bottom: 1px dashed transparent;
+                transition: all 0.25s;
+            }
+            .card a:hover {
+                color: var(--cp-pink) !important;
+                border-bottom-color: var(--cp-pink);
+                text-shadow: 0 0 8px var(--cp-pink);
+            }
+
+            /* Scrollbars */
+            ::-webkit-scrollbar { width: 8px; height: 8px; }
+            ::-webkit-scrollbar-track { background: rgba(0,0,0,0.4); }
+            ::-webkit-scrollbar-thumb {
+                background: linear-gradient(180deg, var(--cp-pink), var(--cp-cyan));
+            }
+
+            .cp-glitch {
+                position: relative;
+                display: inline-block;
+            }
+
+            /* Floating action dock - bottom-right anchored FAB cluster */
+            .cp-action-bar {
+                position: fixed;
+                right: 22px;
+                bottom: 22px;
+                z-index: 99999;
+                isolation: isolate;
+                display: flex;
+                flex-direction: row-reverse;
+                align-items: center;
+                gap: 10px;
+                padding: 0;
+                background: transparent;
+                border: 0;
+                box-shadow: none;
+                max-width: calc(100vw - 32px);
+                pointer-events: auto;
+            }
+            /* Primary SAVE FAB - large, magenta, pulses when dirty */
+            .cp-fab-save {
+                position: relative;
+                min-width: 188px;
+                padding: 16px 26px !important;
+                font-size: 0.92rem !important;
+                font-weight: 800 !important;
+                letter-spacing: 0.22em !important;
+                text-transform: uppercase;
+                color: var(--cp-pink) !important;
+                background:
+                    linear-gradient(135deg, rgba(255,43,214,0.45) 0%, rgba(0,240,255,0.25) 100%) !important;
+                border: 2px solid var(--cp-pink) !important;
+                text-shadow: 0 0 10px var(--cp-pink) !important;
+                box-shadow:
+                    0 0 0 1px rgba(0,240,255,0.4),
+                    0 0 24px rgba(255,43,214,0.7),
+                    0 0 48px rgba(255,43,214,0.35),
+                    inset 0 0 18px rgba(255,43,214,0.25) !important;
+                clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
+                cursor: pointer;
+                transition: transform 0.18s ease, box-shadow 0.25s ease;
+                display: inline-flex; align-items: center; gap: 10px;
+                white-space: nowrap;
+                font-family: inherit !important;
+                animation: cp-fab-breathe 3.4s ease-in-out infinite;
+            }
+            @keyframes cp-fab-breathe {
+                0%, 100% {
+                    box-shadow:
+                        0 0 0 1px rgba(0,240,255,0.4),
+                        0 0 24px rgba(255,43,214,0.7),
+                        0 0 48px rgba(255,43,214,0.35),
+                        inset 0 0 18px rgba(255,43,214,0.25);
+                }
+                50% {
+                    box-shadow:
+                        0 0 0 1px rgba(0,240,255,0.55),
+                        0 0 32px rgba(255,43,214,0.9),
+                        0 0 80px rgba(255,43,214,0.45),
+                        inset 0 0 24px rgba(255,43,214,0.4);
+                }
+            }
+            .cp-fab-save:hover {
+                transform: translateY(-3px) scale(1.03);
+                color: #fff !important;
+                text-shadow: 0 0 14px #fff, 0 0 22px var(--cp-pink) !important;
+            }
+            .cp-fab-save .cp-fab-icon {
+                font-size: 1.15em;
+                line-height: 1;
+                color: var(--cp-cyan);
+                text-shadow: 0 0 10px var(--cp-cyan);
+            }
+            .cp-fab-save .cp-fab-dot {
+                width: 8px; height: 8px;
+                background: var(--cp-mint);
+                box-shadow: 0 0 8px var(--cp-mint);
+                transform: rotate(45deg);
+                margin-left: 4px;
+                opacity: 0.5;
+                transition: all 0.2s;
+            }
+            .cp-action-bar.cp-dirty .cp-fab-save {
+                animation: cp-fab-dirty 1.1s ease-in-out infinite;
+                color: #fff !important;
+            }
+            .cp-action-bar.cp-dirty .cp-fab-save .cp-fab-dot {
+                background: var(--cp-pink);
+                box-shadow: 0 0 12px var(--cp-pink), 0 0 24px var(--cp-pink);
+                opacity: 1;
+            }
+            @keyframes cp-fab-dirty {
+                0%, 100% {
+                    box-shadow:
+                        0 0 0 1px var(--cp-pink),
+                        0 0 24px rgba(255,43,214,0.85),
+                        0 0 60px rgba(255,43,214,0.5),
+                        inset 0 0 22px rgba(255,43,214,0.45);
+                    transform: scale(1);
+                }
+                50% {
+                    box-shadow:
+                        0 0 0 2px var(--cp-pink),
+                        0 0 40px rgba(255,43,214,1),
+                        0 0 100px rgba(255,43,214,0.7),
+                        inset 0 0 30px rgba(255,43,214,0.6);
+                    transform: scale(1.04);
+                }
+            }
+            /* Secondary mini buttons - icon-first */
+            .cp-action-btn {
+                background: rgba(8,4,28,0.85) !important;
+                border: 1px solid var(--cp-border) !important;
+                color: var(--cp-cyan) !important;
+                font-family: inherit !important;
+                font-weight: 700 !important;
+                cursor: pointer;
+                width: 46px; height: 46px;
+                padding: 0 !important;
+                letter-spacing: 0 !important;
+                font-size: 1.05rem !important;
+                text-shadow: 0 0 6px var(--cp-cyan) !important;
+                transition: all 0.25s ease;
+                clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+                box-shadow: 0 0 10px rgba(0,240,255,0.35);
+                display: inline-flex; align-items: center; justify-content: center;
+                white-space: nowrap;
+                position: relative;
+            }
+            .cp-action-btn .cp-btn-label { display: none; }
+            .cp-action-btn::after {
+                content: attr(data-tip);
+                position: absolute;
+                bottom: 100%; right: 50%;
+                transform: translate(50%, -8px);
+                background: rgba(8,4,28,0.95);
+                color: var(--cp-cyan);
+                font-size: 10px;
+                letter-spacing: 0.18em;
+                text-transform: uppercase;
+                padding: 5px 9px;
+                border: 1px solid var(--cp-border);
+                opacity: 0; pointer-events: none;
+                transition: opacity 0.2s;
+                white-space: nowrap;
+                text-shadow: 0 0 5px var(--cp-cyan);
+                box-shadow: 0 0 10px rgba(0,240,255,0.4);
+            }
+            .cp-action-btn:hover::after { opacity: 1; }
+            .cp-action-btn:hover {
+                color: var(--cp-pink) !important;
+                border-color: var(--cp-pink) !important;
+                box-shadow: 0 0 16px rgba(255,43,214,0.55) !important;
+                transform: translateY(-2px);
+                text-shadow: 0 0 8px var(--cp-pink) !important;
+            }
+            .cp-action-btn-danger {
+                color: var(--cp-red) !important;
+                border-color: var(--cp-red) !important;
+                text-shadow: 0 0 6px var(--cp-red) !important;
+                box-shadow: 0 0 10px rgba(255,56,96,0.45) !important;
+            }
+            .cp-action-btn-danger:hover {
+                color: #fff !important;
+                box-shadow: 0 0 20px rgba(255,56,96,0.85) !important;
+                transform: translateY(-2px);
+            }
+            .cp-action-btn-saving,
+            .cp-fab-save.cp-action-btn-saving {
+                opacity: 0.7;
+                pointer-events: none;
+                animation: cp-pulse-pink 0.9s ease-in-out infinite !important;
+            }
+            @keyframes cp-pulse-pink {
+                0%, 100% { box-shadow: 0 0 12px rgba(255,43,214,0.45); }
+                50%      { box-shadow: 0 0 36px rgba(255,43,214,0.95); }
+            }
+            .container { padding-bottom: 130px; }
+            .cp-action-status {
+                position: fixed;
+                right: 22px;
+                bottom: 86px;
+                z-index: 99998;
+                padding: 9px 16px;
+                background: rgba(8,4,28,0.95);
+                border: 1px solid var(--cp-mint);
+                color: var(--cp-mint);
+                font-size: 0.78rem;
+                letter-spacing: 0.16em;
+                text-transform: uppercase;
+                text-shadow: 0 0 6px var(--cp-mint);
+                box-shadow: 0 0 14px rgba(0,255,157,0.45);
+                clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px);
+                opacity: 0;
+                transform: translateY(8px);
+                transition: opacity 0.25s, transform 0.25s;
+                pointer-events: none;
+                white-space: nowrap;
+                max-width: calc(100vw - 44px);
+                overflow: hidden; text-overflow: ellipsis;
+            }
+            .cp-action-status.cp-show { opacity: 1; transform: translateY(0); }
+            .cp-action-status.cp-err {
+                border-color: var(--cp-red);
+                color: var(--cp-red);
+                text-shadow: 0 0 6px var(--cp-red);
+                box-shadow: 0 0 14px rgba(255,56,96,0.55);
+            }
+            /* Toast notification stack (top-right) */
+            .cp-toast-stack {
+                position: fixed;
+                top: 88px;
+                right: 22px;
+                z-index: 100000;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                max-width: min(420px, calc(100vw - 32px));
+                pointer-events: none;
+            }
+            .cp-toast {
+                position: relative;
+                display: flex;
+                align-items: flex-start;
+                gap: 12px;
+                padding: 12px 16px 12px 14px;
+                background: linear-gradient(135deg, rgba(8,4,28,0.96) 0%, rgba(20,5,50,0.92) 100%);
+                border: 1px solid var(--cp-mint);
+                color: var(--cp-mint);
+                font-size: 0.82rem;
+                line-height: 1.45;
+                letter-spacing: 0.06em;
+                text-shadow: 0 0 6px var(--cp-mint);
+                box-shadow:
+                    0 0 0 1px rgba(0,255,157,0.25),
+                    0 0 18px rgba(0,255,157,0.45),
+                    0 8px 28px rgba(0,0,0,0.55);
+                backdrop-filter: blur(8px);
+                clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+                transform: translateX(120%);
+                opacity: 0;
+                transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.25s;
+                pointer-events: auto;
+                overflow: hidden;
+                word-break: break-all;
+            }
+            .cp-toast.cp-show { transform: translateX(0); opacity: 1; }
+            .cp-toast.cp-hide { transform: translateX(120%); opacity: 0; }
+            .cp-toast::before {
+                content: "";
+                position: absolute;
+                left: 0; top: 0; bottom: 0;
+                width: 3px;
+                background: var(--cp-mint);
+                box-shadow: 0 0 10px var(--cp-mint);
+            }
+            .cp-toast-icon {
+                font-size: 1.1rem;
+                line-height: 1;
+                margin-top: 1px;
+                flex-shrink: 0;
+                color: var(--cp-mint);
+                text-shadow: 0 0 8px var(--cp-mint);
+            }
+            .cp-toast-body { flex: 1; min-width: 0; }
+            .cp-toast-title {
+                font-size: 0.72rem;
+                font-weight: 800;
+                letter-spacing: 0.22em;
+                text-transform: uppercase;
+                opacity: 0.85;
+                margin-bottom: 2px;
+            }
+            .cp-toast-msg { white-space: pre-wrap; }
+            .cp-toast-close {
+                position: absolute;
+                top: 6px; right: 8px;
+                background: transparent;
+                border: 0;
+                color: inherit;
+                font-size: 14px;
+                cursor: pointer;
+                opacity: 0.55;
+                padding: 2px 4px;
+                line-height: 1;
+                transition: opacity 0.2s;
+            }
+            .cp-toast-close:hover { opacity: 1; }
+            .cp-toast::after {
+                content: "";
+                position: absolute;
+                left: 0; bottom: 0;
+                height: 2px;
+                width: 100%;
+                background: linear-gradient(90deg, var(--cp-mint), transparent);
+                box-shadow: 0 0 6px var(--cp-mint);
+                transform-origin: left;
+                animation: cp-toast-bar var(--cp-toast-dur, 3200ms) linear forwards;
+            }
+            @keyframes cp-toast-bar {
+                from { transform: scaleX(1); }
+                to   { transform: scaleX(0); }
+            }
+            .cp-toast.cp-toast-success { border-color: var(--cp-mint); color: var(--cp-mint); text-shadow: 0 0 6px var(--cp-mint); }
+            .cp-toast.cp-toast-success::before,
+            .cp-toast.cp-toast-success::after { background: var(--cp-mint); box-shadow: 0 0 10px var(--cp-mint); }
+            .cp-toast.cp-toast-success .cp-toast-icon { color: var(--cp-mint); text-shadow: 0 0 8px var(--cp-mint); }
+            .cp-toast.cp-toast-info { border-color: var(--cp-cyan); color: var(--cp-cyan); text-shadow: 0 0 6px var(--cp-cyan); box-shadow: 0 0 0 1px rgba(0,240,255,0.25), 0 0 18px rgba(0,240,255,0.45), 0 8px 28px rgba(0,0,0,0.55); }
+            .cp-toast.cp-toast-info::before,
+            .cp-toast.cp-toast-info::after { background: var(--cp-cyan); box-shadow: 0 0 10px var(--cp-cyan); }
+            .cp-toast.cp-toast-info .cp-toast-icon { color: var(--cp-cyan); text-shadow: 0 0 8px var(--cp-cyan); }
+            .cp-toast.cp-toast-warn { border-color: var(--cp-amber); color: var(--cp-amber); text-shadow: 0 0 6px var(--cp-amber); box-shadow: 0 0 0 1px rgba(255,176,46,0.25), 0 0 18px rgba(255,176,46,0.45), 0 8px 28px rgba(0,0,0,0.55); }
+            .cp-toast.cp-toast-warn::before,
+            .cp-toast.cp-toast-warn::after { background: var(--cp-amber); box-shadow: 0 0 10px var(--cp-amber); }
+            .cp-toast.cp-toast-warn .cp-toast-icon { color: var(--cp-amber); text-shadow: 0 0 8px var(--cp-amber); }
+            .cp-toast.cp-toast-error { border-color: var(--cp-red); color: var(--cp-red); text-shadow: 0 0 6px var(--cp-red); box-shadow: 0 0 0 1px rgba(255,56,96,0.30), 0 0 18px rgba(255,56,96,0.55), 0 8px 28px rgba(0,0,0,0.55); }
+            .cp-toast.cp-toast-error::before,
+            .cp-toast.cp-toast-error::after { background: var(--cp-red); box-shadow: 0 0 10px var(--cp-red); }
+            .cp-toast.cp-toast-error .cp-toast-icon { color: var(--cp-red); text-shadow: 0 0 8px var(--cp-red); }
+
+            /* Tiny floating "unsaved" badge on the FAB */
+            .cp-action-bar.cp-dirty::before {
+                content: "● UNSAVED";
+                position: absolute;
+                top: -22px; right: 6px;
+                font-size: 9px;
+                letter-spacing: 0.3em;
+                color: var(--cp-pink);
+                text-shadow: 0 0 6px var(--cp-pink);
+                background: rgba(8,4,28,0.92);
+                padding: 3px 8px;
+                border: 1px solid var(--cp-pink);
+                box-shadow: 0 0 10px rgba(255,43,214,0.6);
+                animation: cp-pulse-pink 1.6s ease-in-out infinite;
+            }
+
+            @media (max-width: 720px) {
+                .container { padding: 100px 14px 140px; }
+                .card { padding: 22px 18px; }
+                .header { padding: 22px 18px; }
+                .title { font-size: 2rem; }
+                .cp-hud { font-size: 9px; }
+                .cp-action-bar {
+                    right: 50%;
+                    bottom: 14px;
+                    transform: translateX(50%);
+                    gap: 8px;
+                }
+                .cp-fab-save {
+                    min-width: 0;
+                    padding: 13px 18px !important;
+                    font-size: 0.8rem !important;
+                    letter-spacing: 0.16em !important;
+                }
+                .cp-action-btn { width: 42px; height: 42px; }
+                .cp-action-status { right: 50%; transform: translate(50%, 8px); }
+                .cp-action-status.cp-show { transform: translate(50%, 0); }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="matrix-bg"></div>
+        <div class="matrix-code-rain" id="matrixCodeRain"></div>
+            <div class="cp-hud">
+                <span class="cp-hud-line"><span class="cp-hud-label">SYS::</span> ${翻译值.terminal}</span>
+                <span class="cp-hud-line"><span class="cp-hud-label">NODE::</span> NIGHT_CITY</span>
+                <span class="cp-hud-line"><span class="cp-hud-label">LINK::</span> SECURE / ENC</span>
+            </div>
+            <div class="cp-lang-wrapper">
+                <span class="cp-lang-tag">LANG_</span>
+                <select id="languageSelector" onchange="切换语言(this.value)">
+                    <option value="zh" ${!是否值236 ? 'selected' : ''}>🇨🇳 中文</option>
+                    <option value="fa" ${是否值236 ? 'selected' : ''}>🇮🇷 فارسی</option>
+                </select>
+            </div>
+            <button type="button" id="cpFxToggle" class="cp-fx-toggle" onclick="window.切换页面特效()" title="${是否值236 ? 'تغییر افکت‌های صفحه' : '切换页面特效'}" aria-label="FX toggle">
+                <span class="cp-fx-dot" aria-hidden="true"></span>
+                <span id="cpFxLabel">FX: ON</span>
+            </button>
+        <div class="container">
+            <div class="header">
+                    <h1 class="title cp-glitch" data-text="${翻译值.title}">${翻译值.title}</h1>
+                    <p class="subtitle">${翻译值.subtitle}</p>
+            </div>
+            <div class="card">
+                    <h2 class="card-title">${翻译值.selectClient}</h2>
+                <div class="client-grid">
+                    <button class="client-btn" onclick="生成客户端链接(atob('Y2xhc2g='), 'CLASH')">CLASH</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('Y2xhc2g='), 'STASH')">STASH</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('c3VyZ2U='), 'SURGE')">SURGE</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('c2luZ2JveA=='), 'SING-BOX')">SING-BOX</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('bG9vbg=='), 'LOON')">LOON</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('cXVhbng='), 'QUANTUMULT X')">QUANTUMULT X</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('djJyYXk='), 'V2RAY')">V2RAY</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('djJyYXk='), 'V2RAYNG')">V2RAYNG</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('djJyYXk='), 'NEKORAY')">NEKORAY</button>
+                    <button class="client-btn" onclick="生成客户端链接(atob('djJyYXk='), 'Shadowrocket')">Shadowrocket</button>
+                    <button class="client-btn" id="jkClientBtn" style="${启用家宽链式 ? '' : 'display: none;'}" onclick="生成客户端链接('vg', '${翻译值.jkClient}')">${翻译值.jkClient}</button>
+                </div>
+                <div class="subscription-url" id="clientSubscriptionUrl"></div>
+            </div>
+            <div class="card">
+                    <h2 class="card-title">${翻译值.systemStatus}</h2>
+                <div id="systemStatus" style="margin: 20px 0; padding: 15px; background: rgba(8, 4, 28, 0.8); border: 2px solid #00f0ff; box-shadow: 0 0 20px rgba(0, 240, 255, 0.3), inset 0 0 15px rgba(0, 240, 255, 0.1); position: relative; overflow: hidden;">
+                        <div style="color: #00f0ff; margin-bottom: 15px; font-weight: bold; text-shadow: 0 0 5px #00f0ff;">[ ${翻译值.checking} ]</div>
+                        <div id="regionStatus" style="margin: 8px 0; color: #00f0ff; font-family: 'Courier New', monospace; text-shadow: 0 0 3px #00f0ff;">${翻译值.workerRegion}${翻译值.checking}</div>
+                        <div id="geoInfo" style="margin: 8px 0; color: #7aa9c4; font-family: 'Courier New', monospace; font-size: 0.9rem; text-shadow: 0 0 3px #7aa9c4;">${翻译值.detectionMethod}${翻译值.checking}</div>
+                        <div id="backupStatus" style="margin: 8px 0; color: #00f0ff; font-family: 'Courier New', monospace; text-shadow: 0 0 3px #00f0ff;">${翻译值.proxyIPStatus}${翻译值.checking}</div>
+                        <div id="currentIP" style="margin: 8px 0; color: #00f0ff; font-family: 'Courier New', monospace; text-shadow: 0 0 3px #00f0ff;">${翻译值.currentIP}${翻译值.checking}</div>
+                        <div id="echStatus" style="margin: 8px 0; color: #00f0ff; font-family: 'Courier New', monospace; text-shadow: 0 0 3px #00f0ff; font-size: 0.9rem;">ECH状态: ${翻译值.checking}</div>
+                        <div id="regionMatch" style="margin: 8px 0; color: #00f0ff; font-family: 'Courier New', monospace; text-shadow: 0 0 3px #00f0ff;">${翻译值.regionMatch}${翻译值.checking}</div>
+                        <div id="selectionLogic" style="margin: 8px 0; color: #7aa9c4; font-family: 'Courier New', monospace; font-size: 0.9rem; text-shadow: 0 0 3px #7aa9c4;">${翻译值.selectionLogic}${翻译值.selectionLogicText}</div>
+                </div>
+            </div>
+            <div class="card" id="configCard" style="display: none;">
+                    <h2 class="card-title">${翻译值.configManagement}</h2>
+                <div id="kvStatus" style="margin-bottom: 20px; padding: 10px; background: rgba(8, 4, 28, 0.8); border: 1px solid #00f0ff; color: #00f0ff;">
+                    ${翻译值.kvStatusChecking}
+                </div>
+                <div id="configContent" style="display: none;">
+                    <form id="regionForm" style="margin-bottom: 20px;">
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.specifyRegion}</label>
+                            <select id="wkRegion" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                    <option value="">${翻译值.autoDetect}</option>
+                                    <option value="HK">${翻译值.regionNames.HK}</option>
+                                    <option value="US">${翻译值.regionNames.US}</option>
+                                    <option value="SG">${翻译值.regionNames.SG}</option>
+                                    <option value="JP">${翻译值.regionNames.JP}</option>
+                                    <option value="KR">${翻译值.regionNames.KR}</option>
+                                    <option value="DE">${翻译值.regionNames.DE}</option>
+                                    <option value="SE">${翻译值.regionNames.SE}</option>
+                                    <option value="NL">${翻译值.regionNames.NL}</option>
+                                    <option value="FI">${翻译值.regionNames.FI}</option>
+                                    <option value="GB">${翻译值.regionNames.GB}</option>
+                            </select>
+                                <small id="wkRegionHint" style="color: #7aa9c4; font-size: 0.85rem; display: none;">⚠️ ${翻译值.customIPDisabledHint}</small>
+                        </div>
+                    </form>
+                    <form id="otherConfigForm" style="margin-bottom: 20px;">
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.protocolSelection}</label>
+                            <div style="padding: 15px; background: rgba(15, 3, 40, 0.6); border: 1px solid #00f0ff; border-radius: 5px;">
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                        <input type="checkbox" id="ev" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1.1rem;">${翻译值.enableProtoV}</span>
+                                    </label>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                        <input type="checkbox" id="et" style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1.1rem;">${翻译值.enableProtoT}</span>
+                                    </label>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                        <input type="checkbox" id="ex" style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1.1rem;">${翻译值.enableXhttp}</span>
+                                    </label>
+                                </div>
+                                <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(0, 240, 255, 0.3);">
+                                    <div style="margin-bottom: 10px;">
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                            <input type="checkbox" id="ech" style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                                <span style="font-size: 1.1rem;">${翻译值.enableECH}</span>
+                                        </label>
+                                        <small style="color: #7aa9c4; font-size: 0.8rem; display: block; margin-top: 5px; margin-left: 26px;">${翻译值.enableECHHint}</small>
+                                    </div>
+                                    <div style="margin-top: 15px; margin-bottom: 10px;">
+                                        <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-size: 0.95rem;">${翻译值.customDNS}</label>
+                                        <input type="text" id="customDNS" placeholder="${翻译值.customDNSPlaceholder}" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                        <small style="color: #7aa9c4; font-size: 0.8rem; display: block; margin-top: 5px;">${翻译值.customDNSHint}</small>
+                                    </div>
+                                    <div style="margin-bottom: 10px;">
+                                        <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-size: 0.95rem;">${翻译值.customECHDomain}</label>
+                                        <input type="text" id="customECHDomain" placeholder="${翻译值.customECHDomainPlaceholder}" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                        <small style="color: #7aa9c4; font-size: 0.8rem; display: block; margin-top: 5px;">${翻译值.customECHDomainHint}</small>
+                                    </div>
+                                    <div style="margin-bottom: 10px;">
+                                        <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-size: 0.95rem;">${翻译值.alpn}</label>
+                                        <select id="alpn" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                            <option value="">${翻译值.alpnDefault}</option>
+                                            <option value="h3">h3</option>
+                                            <option value="h2">h2</option>
+                                            <option value="http/1.1">http/1.1</option>
+                                            <option value="h3,h2">h3,h2</option>
+                                            <option value="h2,http/1.1">h2,http/1.1</option>
+                                            <option value="h3,h2,http/1.1">h3,h2,http/1.1</option>
+                                        </select>
+                                        <small style="color: #7aa9c4; font-size: 0.8rem; display: block; margin-top: 5px;">${翻译值.alpnHint}</small>
+                                    </div>
+                                </div>
+                                <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(0, 240, 255, 0.3);">
+                                        <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-size: 0.95rem;">${翻译值.altPassword}</label>
+                                        <input type="text" id="tp" placeholder="${翻译值.altPasswordPlaceholder}" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                        <small style="color: #7aa9c4; font-size: 0.8rem; display: block; margin-top: 5px;">${翻译值.altPasswordHint}</small>
+                                </div>
+                                    <small style="color: #7aa9c4; font-size: 0.85rem; display: block; margin-top: 10px;">${翻译值.protocolHint}</small>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.customHomepage}</label>
+                                <input type="text" id="customHomepage" placeholder="${翻译值.customHomepagePlaceholder}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${翻译值.customHomepageHint}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.customPath}</label>
+                                <input type="text" id="customPath" placeholder="${是否值236 ? 'مثال: /mypath یا خالی بگذارید تا از UUID استفاده شود' : '例如: /mypath 或留空使用 UUID'}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${是否值236 ? 解码64('2YXYs9uM2LEg2KfYtNiq2LHYp9qpINiz2YHYp9ix2LTbjC4g2Kfar9ixINiu2KfZhNuMINio2q/YsNin2LHbjNivINin2LIgVVVJRCDYqNmHINi52YbZiNin2YYg2YXYs9uM2LEg2KfYs9iq2YHYp9iv2Ycg2YXbjOKAjNi02YjYry4=') : 解码64('6Ieq5a6a5LmJ6K6i6ZiF6Lev5b6E44CC55WZ56m65YiZ5L2/55SoIFVVSUQg5L2c5Li66Lev5b6E44CC')}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.customIP}</label>
+                                <input type="text" id="customIP" placeholder="${是否值236 ? 'مثال: 1.2.3.4:443' : '例如: 1.2.3.4:443'}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${是否值236 ? 解码64('2KLYr9ix2LMg2Ygg2b7ZiNix2KogUHJveHlJUCDYs9mB2KfYsdi024w=') : 解码64('6Ieq5a6a5LmJUHJveHlJUOWcsOWdgOWSjOerr+WPow==')}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.preferredIPs}</label>
+                                <input type="text" id="yx" placeholder="${是否值236 ? 'مثال: 1.2.3.4:443#گره هنگ‌کنگ,5.6.7.8:80#گره آمریکا,example.com:8443#گره سنگاپور' : '例如: 1.2.3.4:443#日本节点,5.6.7.8:80#美国节点,example.com:8443#新加坡节点'}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${是否值236 ? 'فرمت: IP:پورت#نام گره یا IP:پورت (بدون # از نام پیش‌فرض استفاده می‌شود). پشتیبانی از چندین مورد، با کاما جدا می‌شوند. <span style="color: #ffb400;">IP های اضافه شده از طریق API به طور خودکار در اینجا نمایش داده می‌شوند.</span>' : '格式: IP:端口#节点名称 或 IP:端口 (无#则使用默认名称)。支持多个，用逗号分隔。<span style="color: #ffb400;">API添加的IP会自动显示在这里。</span>'}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.preferredIPsURL}</label>
+                                <input type="text" id="yxURL" placeholder="${是否值236 ? 'URL منبع لیست IP ترجیحی را وارد کنید' : '输入优选IP列表来源URL'}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${是否值236 ? 'URL منبع لیست IP ترجیحی سفارشی، اگر خالی بگذارید از آدرس پیش‌فرض استفاده می‌شود' : '自定义优选IP列表来源URL，留空则使用默认地址'}</small>
+                        </div>
+                        
+                        <div style="margin-bottom: 20px; padding: 15px; background: rgba(20, 5, 50, 0.6); border: 2px solid #7aa9c4; border-radius: 8px;">
+                            <h4 style="color: #00f0ff; margin: 0 0 15px 0; font-size: 1.1rem; text-shadow: 0 0 5px #00f0ff;">⚡ ${翻译值.latencyTest}</h4>
+                            <div style="display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; align-items: center;">
+                                <div style="min-width: 120px;">
+                                    <label style="display: block; margin-bottom: 5px; color: #00f0ff; font-size: 0.9rem;">${翻译值.ipSource}</label>
+                                    <select id="ipSourceSelect" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px; cursor: pointer;">
+                                        <option value="manual">${翻译值.manualInput}</option>
+                                        <option value="cfRandom">${翻译值.cfRandomIP}</option>
+                                        <option value="urlFetch">${翻译值.urlFetch}</option>
+                                    </select>
+                                </div>
+                                <div style="width: 100px;">
+                                    <label style="display: block; margin-bottom: 5px; color: #00f0ff; font-size: 0.9rem;">${翻译值.latencyTestPort}</label>
+                                    <input type="number" id="latencyTestPort" value="443" min="1" max="65535" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                </div>
+                                <div id="randomCountDiv" style="width: 100px; display: none;">
+                                    <label style="display: block; margin-bottom: 5px; color: #00f0ff; font-size: 0.9rem;">${翻译值.randomCount}</label>
+                                    <input type="number" id="randomIPCount" value="20" min="1" max="100" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                </div>
+                                <div style="width: 80px;">
+                                    <label style="display: block; margin-bottom: 5px; color: #00f0ff; font-size: 0.9rem;">${是否值236 ? 'رشته‌ها' : '线程'}</label>
+                                    <input type="number" id="testThreads" value="5" min="1" max="50" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                </div>
+                            </div>
+                            <div id="manualInputDiv" style="margin-bottom: 10px;">
+                                <label style="display: block; margin-bottom: 5px; color: #00f0ff; font-size: 0.9rem;">${翻译值.latencyTestIP}</label>
+                                <input type="text" id="latencyTestInput" placeholder="${翻译值.latencyTestIPPlaceholder}" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                            </div>
+                            <div id="urlFetchDiv" style="margin-bottom: 10px; display: none;">
+                                <label style="display: block; margin-bottom: 5px; color: #00f0ff; font-size: 0.9rem;">${翻译值.fetchURL}</label>
+                                <div style="display: flex; gap: 8px;">
+                                    <input type="text" id="fetchURLInput" placeholder="${翻译值.fetchURLPlaceholder}" style="flex: 1; padding: 10px; background: rgba(0, 0, 0, 0.8); border: 1px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 13px;">
+                                    <button type="button" id="fetchIPBtn" style="background: rgba(0, 200, 255, 0.2); border: 1px solid #00aaff; padding: 8px 16px; color: #00aaff; font-family: 'Courier New', monospace; cursor: pointer; white-space: nowrap;">⬇ ${翻译值.fetchIP}</button>
+                                </div>
+                            </div>
+                            <div id="cfRandomDiv" style="margin-bottom: 10px; display: none;">
+                                <button type="button" id="generateCFIPBtn" style="background: rgba(0, 240, 255, 0.15); border: 1px solid #00f0ff; padding: 10px 20px; color: #00f0ff; font-family: 'Courier New', monospace; cursor: pointer; width: 100%; transition: all 0.3s;">🎲 ${翻译值.generateIP}</button>
+                            </div>
+                            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                                <button type="button" id="startLatencyTest" style="background: rgba(0, 240, 255, 0.2); border: 1px solid #00f0ff; padding: 8px 16px; color: #00f0ff; font-family: 'Courier New', monospace; cursor: pointer; transition: all 0.3s;">▶ ${翻译值.startTest}</button>
+                                <button type="button" id="stopLatencyTest" style="background: rgba(255, 0, 0, 0.2); border: 1px solid #ff3860; padding: 8px 16px; color: #ff3860; font-family: 'Courier New', monospace; cursor: pointer; display: none; transition: all 0.3s;">⏹ ${翻译值.stopTest}</button>
+                            </div>
+                            <div id="latencyTestStatus" style="color: #7aa9c4; font-size: 0.9rem; margin-bottom: 10px; display: none;"></div>
+                            <div id="latencyTestResults" style="max-height: 250px; overflow-y: auto; display: none;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                                    <span style="color: #00f0ff; font-weight: bold;">${翻译值.testResult}</span>
+                                    <div style="display: flex; gap: 8px;">
+                                        <button type="button" id="selectAllResults" style="background: transparent; border: 1px solid #7aa9c4; padding: 4px 10px; color: #7aa9c4; font-size: 0.8rem; cursor: pointer;">${翻译值.selectAll}</button>
+                                        <button type="button" id="deselectAllResults" style="background: transparent; border: 1px solid #7aa9c4; padding: 4px 10px; color: #7aa9c4; font-size: 0.8rem; cursor: pointer;">${翻译值.deselectAll}</button>
+                                    </div>
+                                </div>
+                                <div id="cityFilterContainer" style="margin-bottom: 10px; padding: 10px; background: rgba(15, 3, 40, 0.6); border: 1px solid #7aa9c4; border-radius: 4px; display: none;">
+                                    <div style="margin-bottom: 8px;">
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff; font-size: 0.9rem;">
+                                            <input type="radio" name="cityFilterMode" value="all" checked style="margin-right: 6px; width: 16px; height: 16px; cursor: pointer;">
+                                            <span>${是否值236 ? '全部城市' : '全部城市'}</span>
+                                        </label>
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff; font-size: 0.9rem; margin-left: 15px;">
+                                            <input type="radio" name="cityFilterMode" value="fastest10" style="margin-right: 6px; width: 16px; height: 16px; cursor: pointer;">
+                                            <span>${是否值236 ? '只选择最快的10个' : '只选择最快的10个'}</span>
+                                        </label>
+                                    </div>
+                                    <div id="cityCheckboxesContainer" style="display: flex; flex-wrap: wrap; gap: 8px; max-height: 80px; overflow-y: auto; padding: 5px;"></div>
+                                </div>
+                                <div id="latencyResultsList" style="background: rgba(0, 0, 0, 0.5); border: 1px solid #004400; border-radius: 4px; padding: 10px;"></div>
+                                <div style="margin-top: 10px; display: flex; gap: 10px;">
+                                    <button type="button" id="overwriteSelectedToYx" style="flex: 1; background: rgba(0, 220, 130, 0.3); border: 1px solid #00f0ff; padding: 10px 20px; color: #00f0ff; font-family: 'Courier New', monospace; font-weight: bold; cursor: pointer; transition: all 0.3s;">${是否值236 ? '覆盖添加' : '覆盖添加'}</button>
+                                    <button type="button" id="appendSelectedToYx" style="flex: 1; background: rgba(0, 178, 110, 0.3); border: 1px solid #7aa9c4; padding: 10px 20px; color: #7aa9c4; font-family: 'Courier New', monospace; font-weight: bold; cursor: pointer; transition: all 0.3s;">${是否值236 ? '追加添加' : '追加添加'}</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.socks5Config}</label>
+                                <input type="text" id="socksConfig" placeholder="${是否值236 ? 解码64('2YXYq9in2YQ6IHVzZXI6cGFzc0Bob3N0OnBvcnQg24zYpyBodHRwOi8vdXNlcjpwYXNzQGhvc3Q6cG9ydA==') : 解码64('5L6L5aaCOiB1c2VyOnBhc3NAaG9zdDpwb3J0IOaIliBodHRwOi8vdXNlcjpwYXNzQGhvc3Q6cG9ydA==')}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${是否值236 ? 解码64('2KLYr9ix2LMg2b7YsdmI2qnYs9uMINiu2LHZiNis24wg2KjYsdin24wg2KfZhtiq2YLYp9mEINiq2YXYp9mFINiq2LHYp9mB24zaqSDYrtix2YjYrNuMLiDYqNiv2YjZhiDZvtuM2LTZiNmG2K8g2KjZhyDYtdmI2LHYqiBzNSDYr9ixINmG2LjYsSDar9ix2YHYqtmHINmF24zigIzYtNmI2K8=') : 解码64('5Ye656uZ5Luj55CG5Zyw5Z2A77yM55So5LqO6L2s5Y+R5omA5pyJ5Ye656uZ5rWB6YeP44CC5LiN5YaZ5YmN57yA6buY6K6k5oyJIHM1IOWkhOeQhg==')}</small>
+                        </div>
+                    </form>
+
+                    <h3 style="color: #00f0ff; margin: 20px 0 15px 0; font-size: 1.2rem;">${翻译值.advancedControl}</h3>
+                    <form id="advancedConfigForm" style="margin-bottom: 20px;">
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.subscriptionConverter}</label>
+                                <input type="text" id="scu" placeholder="${翻译值.subscriptionConverterPlaceholder}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${翻译值.subscriptionConverterHint}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.builtinPreferred}</label>
+                            <div style="padding: 15px; background: rgba(15, 3, 40, 0.6); border: 1px solid #00f0ff; border-radius: 5px;">
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                        <input type="checkbox" id="ena" style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1.1rem;">${翻译值.enableNativeAddress}</span>
+                                    </label>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                        <input type="checkbox" id="epd" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1.1rem;">${翻译值.enablePreferredDomain}</span>
+                                    </label>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                        <input type="checkbox" id="epi" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1.1rem;">${翻译值.enablePreferredIP}</span>
+                                    </label>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                        <input type="checkbox" id="egi" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1.1rem;">${翻译值.enableGitHubPreferred}</span>
+                                    </label>
+                                </div>
+                                    <small style="color: #7aa9c4; font-size: 0.85rem; display: block; margin-top: 10px;">${翻译值.builtinPreferredHint}</small>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.jkSection}</label>
+                            <div style="padding: 15px; background: rgba(15, 3, 40, 0.6); border: 1px solid #00f0ff; border-radius: 5px;">
+                                <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                    <input type="checkbox" id="jk" style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                        <span style="font-size: 1.1rem;">${翻译值.jkEnable}</span>
+                                </label>
+                                    <small style="color: #7aa9c4; font-size: 0.85rem; display: block; margin-top: 10px;">${翻译值.jkHint}</small>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">优选IP筛选设置</label>
+                            <div style="padding: 15px; background: rgba(15, 3, 40, 0.6); border: 1px solid #00f0ff; border-radius: 5px;">
+                                <div style="margin-bottom: 15px;">
+                                    <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">IP版本选择</label>
+                                    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                            <input type="checkbox" id="ipv4Enabled" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1rem;">IPv4</span>
+                                        </label>
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                            <input type="checkbox" id="ipv6Enabled" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1rem;">IPv6</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div style="margin-bottom: 10px;">
+                                    <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">运营商选择</label>
+                                    <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                            <input type="checkbox" id="ispMobile" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1rem;">移动</span>
+                                        </label>
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                            <input type="checkbox" id="ispUnicom" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1rem;">联通</span>
+                                        </label>
+                                        <label style="display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff;">
+                                            <input type="checkbox" id="ispTelecom" checked style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
+                                            <span style="font-size: 1rem;">电信</span>
+                                        </label>
+                                    </div>
+                                </div>
+                                    <small style="color: #7aa9c4; font-size: 0.85rem; display: block; margin-top: 10px;">选择要使用的IP版本和运营商，未选中的将被过滤</small>
+                            </div>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.allowAPIManagement}</label>
+                            <select id="apiEnabled" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                    <option value="">${翻译值.apiEnabledDefault}</option>
+                                    <option value="yes">${翻译值.apiEnabledYes}</option>
+                            </select>
+                                <small style="color: #ffb400; font-size: 0.85rem;">${翻译值.apiEnabledHint}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.regionMatching}</label>
+                            <select id="regionMatching" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                    <option value="">${翻译值.regionMatchingDefault}</option>
+                                    <option value="no">${翻译值.regionMatchingNo}</option>
+                            </select>
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${翻译值.regionMatchingHint}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.downgradeControl}</label>
+                            <select id="downgradeControl" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                    <option value="">${翻译值.downgradeControlDefault}</option>
+                                    <option value="no">${翻译值.downgradeControlNo}</option>
+                                    <option value="only">${翻译值.downgradeControlOnly}</option>
+                            </select>
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${翻译值.downgradeControlHint}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.tlsControl}</label>
+                            <select id="portControl" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                    <option value="">${翻译值.tlsControlDefault}</option>
+                                    <option value="yes">${翻译值.tlsControlYes}</option>
+                            </select>
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${翻译值.tlsControlHint}</small>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                                <label style="display: block; margin-bottom: 8px; color: #00f0ff; font-weight: bold; text-shadow: 0 0 3px #00f0ff;">${翻译值.preferredControl}</label>
+                            <select id="preferredControl" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.8); border: 2px solid #00f0ff; color: #00f0ff; font-family: 'Courier New', monospace; font-size: 14px;">
+                                    <option value="">${翻译值.preferredControlDefault}</option>
+                                    <option value="yes">${翻译值.preferredControlYes}</option>
+                            </select>
+                                <small style="color: #7aa9c4; font-size: 0.85rem;">${翻译值.preferredControlHint}</small>
+                        </div>
+                    </form>
+                    <div id="currentConfig" style="background: rgba(0, 0, 0, 0.9); border: 1px solid #00f0ff; padding: 15px; margin: 10px 0; font-family: 'Courier New', monospace; color: #00f0ff;">
+                            ${翻译值.loading}
+                    </div>
+                    <div id="pathTypeInfo" style="background: rgba(15, 3, 40, 0.7); border: 1px solid #00f0ff; padding: 15px; margin: 10px 0; font-family: 'Courier New', monospace; color: #00f0ff;">
+                            <div style="font-weight: bold; margin-bottom: 8px; color: #00ff9d; text-shadow: 0 0 5px #00ff9d;">${翻译值.currentConfig}</div>
+                            <div id="pathTypeStatus">${翻译值.checking}</div>
+                    </div>
+                </div>
+                <div id="statusMessage" style="display: none; padding: 10px; margin: 10px 0; border: 1px solid #00f0ff; background: rgba(8, 4, 28, 0.8); color: #00f0ff; text-shadow: 0 0 5px #00f0ff;"></div>
+            </div>
+            
+            <div class="card">
+                    <h2 class="card-title">${翻译值.relatedLinks}</h2>
+                <div style="text-align: center; margin: 20px 0;">
+                        <a href="https://github.com/byJoey/cfnew" target="_blank" style="color: #00f0ff; text-decoration: none; margin: 0 20px; font-size: 1.2rem; text-shadow: 0 0 5px #00f0ff;">${翻译值.githubProject}</a>
+                        <a href="https://github.com/byJoey/yx-tools/releases/" target="_blank" rel="noopener noreferrer" style="color: #00f0ff; text-decoration: none; margin: 0 20px; font-size: 1.2rem; text-shadow: 0 0 5px #00f0ff;">${翻译值.优选工具}</a>
+                    <a href="https://www.youtube.com/@joeyblog" target="_blank" style="color: #00f0ff; text-decoration: none; margin: 0 20px; font-size: 1.2rem; text-shadow: 0 0 5px #00f0ff;">YouTube @joeyblog</a>
+                </div>
+            </div>
+        </div>
+        <div id="cpToastStack" class="cp-toast-stack" aria-live="polite" aria-atomic="false"></div>
+        <div id="cpActionStatus" class="cp-action-status" role="status" aria-live="polite"></div>
+        <div id="cpActionBar" class="cp-action-bar" role="toolbar" aria-label="${翻译值.configManagement}">
+            <button type="button" id="cpBtnSaveAll" class="cp-fab-save" title="${是否值236 ? 'ذخیره همه تنظیمات' : '保存所有配置 (Ctrl+S)'}">
+                <span class="cp-fab-icon">▣</span>
+                <span>${是否值236 ? 'ذخیره همه' : '保 存 全 部'}</span>
+                <span class="cp-fab-dot" aria-hidden="true"></span>
+            </button>
+            <button type="button" id="cpBtnRefresh" class="cp-action-btn" data-tip="${翻译值.refreshConfig}" aria-label="${翻译值.refreshConfig}">
+                <span aria-hidden="true">↻</span>
+                <span class="cp-btn-label">${翻译值.refreshConfig}</span>
+            </button>
+            <button type="button" id="cpBtnReset" class="cp-action-btn cp-action-btn-danger" data-tip="${翻译值.resetConfig}" aria-label="${翻译值.resetConfig}">
+                <span aria-hidden="true">⌫</span>
+                <span class="cp-btn-label">${翻译值.resetConfig}</span>
+            </button>
+        </div>
+        <script>
+// 地址从服务器配置注入
+var 订阅转换网址 = "${订阅转换接口}";
+// 远程配置URL（硬编码）
+var 远程配置网址 = "${远程配置网址}";
+
+// 翻译对象
+const 本地值20215 = {
+  zh: {
+    subscriptionCopied: '${解码64('6K6i6ZiF6ZO+5o6l5bey5aSN5Yi2')}',
+    autoSubscriptionCopied: '${解码64('6Ieq5Yqo6K+G5Yir6K6i6ZiF6ZO+5o6l5bey5aSN5Yi277yM5a6i5oi356uv6K6/6Zeu5pe25Lya5qC55o2uVXNlci1BZ2VudOiHquWKqOivhuWIq+W5tui/lOWbnuWvueW6lOagvOW8jw==')}'
+  },
+  fa: {
+    subscriptionCopied: 'لینک اشتراک کپی شد',
+    autoSubscriptionCopied: 'لینک اشتراک تشخیص خودکار کپی شد، کلاینت هنگام دسترسی بر اساس User-Agent به طور خودکار تشخیص داده و قالب مربوطه را برمی‌گرداند'
+  }
 };
+function 获取凭据20214(名称20213) {
+  const 值20212 = '; ' + document.cookie;
+  const 部分列表20211 = 值20212.split('; ' + 名称20213 + '=');
+  if (部分列表20211.length === 2) return 部分列表20211.pop().split(';').shift();
+  return null;
+}
+const 浏览器语言20210 = navigator.language || navigator.userLanguage || '';
+const 已保存语言20209 = localStorage.getItem('preferredLanguage') || 获取凭据20214('preferredLanguage');
+let 是否值20208 = false;
+if (已保存语言20209 === 'fa' || 已保存语言20209 === 'fa-IR') {
+  是否值20208 = true;
+} else if (已保存语言20209 === 'zh' || 已保存语言20209 === 'zh-CN') {
+  是否值20208 = false;
+} else {
+  是否值20208 = 浏览器语言20210.includes('fa') || 浏览器语言20210.includes('fa-IR');
+}
+const 翻译值20207 = 本地值20215[是否值20208 ? 'fa' : 'zh'];
+function 切换语言(语言) {
+  localStorage.setItem('preferredLanguage', 语言);
+  // 设置Cookie（有效期1年）
+  const 过期日期20206 = new Date();
+  过期日期20206.setFullYear(过期日期20206.getFullYear() + 1);
+  document.cookie = 'preferredLanguage=' + 语言 + '; path=/; expires=' + 过期日期20206.toUTCString() + '; SameSite=Lax';
+  // 刷新页面，不使用URL参数
+  window.location.reload();
+}
 
-function getPanelsList() {
-    const panels = [];
-    panels.push({
-        name: sysConfig.name || "Main Panel",
-        host: null,
-        apiRoute: sysConfig.apiRoute,
-        apiKey: null,
-        isLocal: true,
+// 页面加载时检查 localStorage 和 Cookie，并清理URL参数
+window.addEventListener('DOMContentLoaded', function () {
+  const 已保存语言20205 = localStorage.getItem('preferredLanguage') || 获取凭据20214('preferredLanguage');
+  const 网址参数 = new URLSearchParams(window.location.search);
+  const 网址语言 = 网址参数.get('lang');
+
+  // 如果URL中有语言参数，移除它并设置Cookie
+  if (网址语言) {
+    const 当前网址20204 = new URL(window.location.href);
+    当前网址20204.searchParams.delete('lang');
+    const 新网址 = 当前网址20204.toString();
+
+    // 设置Cookie
+    const 过期日期20203 = new Date();
+    过期日期20203.setFullYear(过期日期20203.getFullYear() + 1);
+    document.cookie = 'preferredLanguage=' + 网址语言 + '; path=/; expires=' + 过期日期20203.toUTCString() + '; SameSite=Lax';
+    localStorage.setItem('preferredLanguage', 网址语言);
+
+    // 使用history API移除URL参数，不刷新页面
+    window.history.replaceState({}, '', 新网址);
+  } else if (已保存语言20205) {
+    // 如果localStorage中有但Cookie中没有，同步到Cookie
+    const 过期日期 = new Date();
+    过期日期.setFullYear(过期日期.getFullYear() + 1);
+    document.cookie = 'preferredLanguage=' + 已保存语言20205 + '; path=/; expires=' + 过期日期.toUTCString() + '; SameSite=Lax';
+  }
+});
+
+// 赛博朋克风 toast 通知 (替代 alert)
+window.显示提示 = function (消息20202, 类型20201, 本地值20200) {
+  本地值20200 = 本地值20200 || {};
+  var 堆栈 = document.getElementById('cpToastStack');
+  if (!堆栈) return;
+  var 类型映射 = {
+    success: '✓',
+    info: '⌬',
+    warn: '⚠',
+    error: '✕'
+  };
+  var 标题映射 = {
+    success: 'SUCCESS',
+    info: 'INFO',
+    warn: 'WARN',
+    error: 'ERROR'
+  };
+  类型20201 = 类型映射[类型20201] ? 类型20201 : 'success';
+  var 持续时间 = 本地值20200.duration || 3200;
+  var 提示 = document.createElement('div');
+  提示.className = 'cp-toast cp-toast-' + 类型20201;
+  提示.style.setProperty('--cp-toast-dur', 持续时间 + 'ms');
+  var 图标 = document.createElement('span');
+  图标.className = 'cp-toast-icon';
+  图标.textContent = 类型映射[类型20201];
+  var 主体 = document.createElement('div');
+  主体.className = 'cp-toast-body';
+  var 标题 = document.createElement('div');
+  标题.className = 'cp-toast-title';
+  标题.textContent = 本地值20200.title || 标题映射[类型20201];
+  var 消息20199 = document.createElement('div');
+  消息20199.className = 'cp-toast-msg';
+  消息20199.textContent = String(消息20202 == null ? '' : 消息20202);
+  主体.appendChild(标题);
+  主体.appendChild(消息20199);
+  var 关闭 = document.createElement('button');
+  关闭.type = 'button';
+  关闭.className = 'cp-toast-close';
+  关闭.setAttribute('aria-label', 'close');
+  关闭.textContent = '✕';
+  提示.appendChild(图标);
+  提示.appendChild(主体);
+  提示.appendChild(关闭);
+  堆栈.appendChild(提示);
+  requestAnimationFrame(function () {
+    提示.classList.add('cp-show');
+  });
+  var 本地值20198 = false;
+  function 关闭提示() {
+    if (本地值20198) return;
+    本地值20198 = true;
+    提示.classList.remove('cp-show');
+    提示.classList.add('cp-hide');
+    setTimeout(function () {
+      if (提示.parentNode) 提示.parentNode.removeChild(提示);
+    }, 400);
+  }
+  关闭.addEventListener('click', 关闭提示);
+  var 计时器 = setTimeout(关闭提示, 持续时间);
+  提示.addEventListener('mouseenter', function () {
+    clearTimeout(计时器);
+  });
+  提示.addEventListener('mouseleave', function () {
+    计时器 = setTimeout(关闭提示, 1200);
+  });
+  return {
+    dismiss: 关闭提示,
+    element: 提示
+  };
+};
+function 尝试打开应用(方案网址20197, 回退回调, 超时20196) {
+  超时20196 = 超时20196 || 2500;
+  var 应用已打开 = false;
+  var 回调已执行 = false;
+  var 开始值 = Date.now();
+  var 值值20195 = function () {
+    var 耗时20194 = Date.now() - 开始值;
+    if (耗时20194 < 3000 && !回调已执行) {
+      应用已打开 = true;
+    }
+  };
+  window.addEventListener('blur', 值值20195);
+  var 值值20193 = function () {
+    var 耗时 = Date.now() - 开始值;
+    if (耗时 < 3000 && !回调已执行) {
+      应用已打开 = true;
+    }
+  };
+  document.addEventListener('visibilitychange', 值值20193);
+  var 内嵌框架 = document.createElement('iframe');
+  内嵌框架.style.display = 'none';
+  内嵌框架.style.width = '1px';
+  内嵌框架.style.height = '1px';
+  内嵌框架.src = 方案网址20197;
+  document.body.appendChild(内嵌框架);
+  setTimeout(function () {
+    内嵌框架.parentNode && 内嵌框架.parentNode.removeChild(内嵌框架);
+    window.removeEventListener('blur', 值值20195);
+    document.removeEventListener('visibilitychange', 值值20193);
+    if (!回调已执行) {
+      回调已执行 = true;
+      if (!应用已打开 && 回退回调) {
+        回退回调();
+      }
+    }
+  }, 超时20196);
+}
+function 生成客户端链接(客户端类型, 客户端名称) {
+  var 当前网址20192 = window.location.href;
+  var 订阅网址20191 = 当前网址20192 + "/sub";
+  var 方案网址 = '';
+  var 显示名称 = 客户端名称 || '';
+  var 最终网址 = 订阅网址20191;
+  if (客户端类型 === atob('djJyYXk=')) {
+    最终网址 = 订阅网址20191;
+    var 网址值20190 = document.getElementById("clientSubscriptionUrl");
+    网址值20190.textContent = 最终网址;
+    网址值20190.style.display = "block";
+    网址值20190.style.overflowWrap = "break-word";
+    网址值20190.style.wordBreak = "break-all";
+    网址值20190.style.overflowX = "auto";
+    网址值20190.style.maxWidth = "100%";
+    网址值20190.style.boxSizing = "border-box";
+    if (客户端名称 === 'V2RAY') {
+      navigator.clipboard.writeText(最终网址).then(function () {
+        显示提示(显示名称 + " " + 翻译值20207.subscriptionCopied, 'success');
+      });
+    } else if (客户端名称 === 'Shadowrocket') {
+      方案网址 = '${解码64('c2hhZG93cm9ja2V0Oi8vYWRkLw==')}' + encodeURIComponent(最终网址);
+      尝试打开应用(方案网址, function () {
+        navigator.clipboard.writeText(最终网址).then(function () {
+          显示提示(显示名称 + " " + 翻译值20207.subscriptionCopied, 'success');
+        });
+      });
+    } else if (客户端名称 === 'V2RAYNG') {
+      方案网址 = '${解码64('djJyYXluZzovL2luc3RhbGw/dXJsPQ==')}' + encodeURIComponent(最终网址);
+      尝试打开应用(方案网址, function () {
+        navigator.clipboard.writeText(最终网址).then(function () {
+          显示提示(显示名称 + " " + 翻译值20207.subscriptionCopied, 'success');
+        });
+      });
+    } else if (客户端名称 === 'NEKORAY') {
+      方案网址 = '${解码64('bmVrb3JheTovL2luc3RhbGwtY29uZmlnP3VybD0=')}' + encodeURIComponent(最终网址);
+      尝试打开应用(方案网址, function () {
+        navigator.clipboard.writeText(最终网址).then(function () {
+          显示提示(显示名称 + " " + 翻译值20207.subscriptionCopied, 'success');
+        });
+      });
+    }
+  } else {
+    // 统一走内部格式转换
+    最终网址 = 订阅网址20191 + (订阅网址20191.includes('?') ? '&' : '?') + "target=" + 客户端类型;
+    var 网址值20190 = document.getElementById("clientSubscriptionUrl");
+    网址值20190.textContent = 最终网址;
+    网址值20190.style.display = "block";
+    网址值20190.style.overflowWrap = "break-word";
+    网址值20190.style.wordBreak = "break-all";
+    网址值20190.style.overflowX = "auto";
+    网址值20190.style.maxWidth = "100%";
+    网址值20190.style.boxSizing = "border-box";
+    if (客户端类型 === 'vg') {
+      方案网址 = '${解码64('Y2xhc2g6Ly9pbnN0YWxsLWNvbmZpZz91cmw9')}' + encodeURIComponent(最终网址);
+    } else if (客户端类型 === atob('Y2xhc2g=')) {
+      if (客户端名称 === 'STASH') {
+        方案网址 = '${解码64('c3Rhc2g6Ly9pbnN0YWxsP3VybD0=')}' + encodeURIComponent(最终网址);
+        显示名称 = 'STASH';
+      } else {
+        方案网址 = '${解码64('Y2xhc2g6Ly9pbnN0YWxsLWNvbmZpZz91cmw9')}' + encodeURIComponent(最终网址);
+        显示名称 = 'CLASH';
+      }
+    } else if (客户端类型 === atob('c3VyZ2U=')) {
+      方案网址 = '${解码64('c3VyZ2U6Ly8vaW5zdGFsbC1jb25maWc/dXJsPQ==')}' + encodeURIComponent(最终网址);
+      显示名称 = 'SURGE';
+    } else if (客户端类型 === atob('c2luZ2JveA==')) {
+      方案网址 = '${解码64('c2luZy1ib3g6Ly9pbnN0YWxsLWNvbmZpZz91cmw9')}' + encodeURIComponent(最终网址);
+      显示名称 = 'SING-BOX';
+    } else if (客户端类型 === atob('bG9vbg==')) {
+      方案网址 = '${解码64('bG9vbjovL2luc3RhbGw/dXJsPQ==')}' + encodeURIComponent(最终网址);
+      显示名称 = 'LOON';
+    } else if (客户端类型 === atob('cXVhbng=')) {
+      方案网址 = '${解码64('cXVhbnR1bXVsdC14Oi8vaW5zdGFsbC1jb25maWc/dXJsPQ==')}' + encodeURIComponent(最终网址);
+      显示名称 = 'QUANTUMULT X';
+    }
+    if (方案网址) {
+      尝试打开应用(方案网址, function () {
+        navigator.clipboard.writeText(最终网址).then(function () {
+          显示提示(显示名称 + " " + 翻译值20207.subscriptionCopied, 'success');
+        });
+      });
+    } else {
+      navigator.clipboard.writeText(最终网址).then(function () {
+        显示提示(显示名称 + " " + 翻译值20207.subscriptionCopied, 'success');
+      });
+    }
+  }
+}
+
+// 页面特效图形化开关 (localStorage 持久化)
+window.应用页面特效 = function () {
+  var 本地值20189 = localStorage.getItem('cp-fx-off') === '1';
+  document.body.classList.toggle('fx-off', 本地值20189);
+  var 本地值20188 = document.getElementById('cpFxLabel');
+  if (本地值20188) 本地值20188.textContent = 本地值20189 ? 'FX: OFF' : 'FX: ON';
+  if (本地值20189) {
+    var 本地值20187 = document.getElementById('matrixCodeRain');
+    if (本地值20187) 本地值20187.innerHTML = '';
+  } else if (typeof 创建矩阵雨 === 'function') {
+    var 结果值 = document.getElementById('matrixCodeRain');
+    if (结果值 && !结果值.firstChild) 创建矩阵雨();
+  }
+};
+window.切换页面特效 = function () {
+  var 本地值20186 = localStorage.getItem('cp-fx-off') === '1';
+  localStorage.setItem('cp-fx-off', 本地值20186 ? '0' : '1');
+  window.应用页面特效();
+};
+(function () {
+  if (localStorage.getItem('cp-fx-off') === '1') {
+    document.addEventListener('DOMContentLoaded', function () {
+      document.body.classList.add('fx-off');
+      var 本地值20185 = document.getElementById('cpFxLabel');
+      if (本地值20185) 本地值20185.textContent = 'FX: OFF';
     });
-    if (sysConfig.linkedPanels && Array.isArray(sysConfig.linkedPanels)) {
-        sysConfig.linkedPanels.forEach((p) => {
-            if (p && p.host) {
-                panels.push({
-                    name: p.name || p.host,
-                    host: p.host,
-                    apiRoute: p.apiRoute || sysConfig.apiRoute,
-                    apiKey: p.apiKey || p.masterKey || null,
-                    isLocal: false,
-                });
-            }
-        });
+  }
+})();
+function 创建矩阵雨() {
+  if (document.body && document.body.classList.contains('fx-off')) return;
+  const 矩阵值 = document.getElementById('matrixCodeRain');
+  if (!矩阵值) return;
+  const 赛博字符列表 = '01アイウエオカキクケコサシスセソタチツテトナニヌネノ$%#@!?<>+=ABCDEF';
+  const 调色板 = ['#00f0ff', '#ff2bd6', '#a347ff', '#00ff9d'];
+  const 列数 = Math.floor(window.innerWidth / 20);
+  for (let 索引值20184 = 0; 索引值20184 < 列数; 索引值20184++) {
+    const 列20183 = document.createElement('div');
+    列20183.className = 'matrix-column';
+    列20183.style.left = 索引值20184 * 20 + 'px';
+    列20183.style.animationDelay = -Math.random() * 15 + 's';
+    列20183.style.animationDuration = Math.random() * 14 + 8 + 's';
+    列20183.style.fontSize = Math.random() * 4 + 12 + 'px';
+    列20183.style.opacity = (Math.random() * 0.7 + 0.3).toFixed(2);
+    let 文本20182 = '';
+    const 字符数量 = Math.floor(Math.random() * 30 + 18);
+    for (let 次索引值 = 0; 次索引值 < 字符数量; 次索引值++) {
+      const 字符 = 赛博字符列表[Math.floor(Math.random() * 赛博字符列表.length)];
+      const 值强调 = Math.random() > 0.85;
+      const 颜色 = 值强调 ? 调色板[Math.floor(Math.random() * 调色板.length)] : '';
+      文本20182 += 颜色 ? '<span style="color:' + 颜色 + ';text-shadow:0 0 8px ' + 颜色 + ';">' + 字符 + '</span><br>' : '<span>' + 字符 + '</span><br>';
     }
-    return panels;
-}
-
-async function remotePanelFetch(panel, method, path, body = null) {
-    try {
-        const url = `https://${panel.host}/${encodeURI(panel.apiRoute)}${path}`;
-        const options = {
-            method,
-            headers: { "Content-Type": "application/json" },
-        };
-        if (body) options.body = JSON.stringify(body);
-        const res = await fetchT(url, {
-            ...options,
-            signal: AbortSignal.timeout(8000),
-        });
-        return await res.json();
-    } catch (e) {
-        return { success: false, error: e.message };
-    }
-}
-
-async function fetchRemotePanelUsers(panel) {
-    return await remotePanelFetch(
-        panel,
-        "GET",
-        `/api/users?key=${encodeURIComponent(panel.apiKey)}`,
-    );
-}
-
-async function fetchRemotePanelUser(panel, userId) {
-    return await remotePanelFetch(
-        panel,
-        "GET",
-        `/api/users?id=${encodeURIComponent(userId)}&key=${encodeURIComponent(panel.apiKey)}`,
-    );
-}
-
-async function fetchRemotePanelStats(panel) {
-    return await remotePanelFetch(
-        panel,
-        "GET",
-        `/api/stats?key=${encodeURIComponent(panel.apiKey)}`,
-    );
-}
-
-async function fetchRemotePanelConfig(panel) {
-    return await remotePanelFetch(panel, "POST", "/api/auth", {
-        key: panel.apiKey,
+    列20183.innerHTML = 文本20182;
+    矩阵值.appendChild(列20183);
+  }
+  setInterval(function () {
+    const 列列表 = 矩阵值.querySelectorAll('.matrix-column');
+    列列表.forEach(function (列) {
+      if (Math.random() > 0.94) {
+        const 字符列表 = 列.querySelectorAll('span');
+        if (字符列表.length > 0) {
+          const 目标20181 = 字符列表[Math.floor(Math.random() * 字符列表.length)];
+          const 本地值20180 = 目标20181.style.color;
+          目标20181.style.color = '#ffffff';
+          目标20181.style.textShadow = '0 0 10px #ffffff, 0 0 18px #00f0ff';
+          setTimeout(function () {
+            目标20181.style.color = 本地值20180;
+            目标20181.style.textShadow = '';
+          }, 200);
+        }
+      }
     });
+  }, 110);
 }
+async function 检查系统状态() {
+  try {
+    const 云墙状态 = document.getElementById('cfStatus');
+    const 地区状态 = document.getElementById('regionStatus');
+    const 值值20179 = document.getElementById('geoInfo');
+    const 备用状态 = document.getElementById('backupStatus');
+    const 当前地址 = document.getElementById('currentIP');
+    const 地区值 = document.getElementById('regionMatch');
 
-async function remotePanelWriteAction(panel, method, userId, body = null) {
-    let path = "/api/users";
-    if (userId)
-        path += `?id=${encodeURIComponent(userId)}&key=${encodeURIComponent(panel.apiKey)}`;
-    else path += `?key=${encodeURIComponent(panel.apiKey)}`;
-    return await remotePanelFetch(
-        panel,
-        method,
-        path,
-        body || { key: panel.apiKey },
-    );
-}
-
-async function remotePanelToggleUser(panel, userId) {
-    return await remotePanelFetch(
-        panel,
-        "POST",
-        `/api/users?id=${encodeURIComponent(userId)}&action=toggle&key=${encodeURIComponent(panel.apiKey)}`,
-    );
-}
-
-async function remotePanelResetTraffic(panel, userId) {
-    return await remotePanelFetch(
-        panel,
-        "POST",
-        `/api/users?id=${encodeURIComponent(userId)}&action=reset&key=${encodeURIComponent(panel.apiKey)}`,
-    );
-}
-
-async function handleTelegramWebhook(request, env, hostName, ctx) {
-    try {
-        const update = await request.json();
-        const tgApi = `https://api.telegram.org/bot${sysConfig.tgToken}`;
-
-        const langCode = sysConfig.tgBotLang || "fa";
-        const t = (key) =>
-            botI18n[langCode]?.[key] || botI18n["en"]?.[key] || key;
-
-        const callerId =
-            update.callback_query?.from?.id?.toString() ||
-            update.message?.from?.id?.toString();
-        const adminId = sysConfig.tgAdminId || sysConfig.tgChatId;
-        const isAuthorized = adminId && callerId === adminId.toString();
-
-        if (!isAuthorized) {
-            const chatId =
-                update.callback_query?.message?.chat?.id ||
-                update.message?.chat?.id;
-            if (chatId) {
-                await fetchT(`${tgApi}/sendMessage`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        text:
-                            "❌ *شما دسترسی به این ربات را ندارید.*\n\nیوزر آیدی شما جهت اضافه کردن به لیست ادمین ها: `" +
-                            (callerId || "Unknown") +
-                            "`",
-                        parse_mode: "Markdown",
-                    }),
-                });
-            }
-            return new Response(
-                JSON.stringify({ success: false, error: "Unauthorized" }),
-                { status: 200 },
-            );
-        }
-
-        let tgState = {};
-        try {
-            const storedState = await d1Get(env, "tg_bot_state");
-            if (storedState) tgState = JSON.parse(storedState);
-        } catch (e) {}
-
-        const panels = getPanelsList();
-
-        // Read last login signal from D1 (set by handleAuth or handleSyncPanel)
-        let lastLoginPanel = null;
-        try {
-            const stored = await d1Get(env, "tg_panel_login");
-            if (stored) lastLoginPanel = JSON.parse(stored);
-        } catch (e) {}
-
-        const getActivePanel = () => {
-            if (lastLoginPanel) {
-                if (lastLoginPanel.isLocal)
-                    return panels.find((p) => p.isLocal) || panels[0];
-                const found = panels.find(
-                    (p) => !p.isLocal && p.host === lastLoginPanel.host,
-                );
-                if (found) return found;
-                // Remote panel not in linkedPanels — synthesize from login signal
-                return {
-                    name: lastLoginPanel.name || lastLoginPanel.host,
-                    host: lastLoginPanel.host,
-                    apiRoute: lastLoginPanel.apiRoute || sysConfig.apiRoute,
-                    apiKey:
-                        lastLoginPanel.apiKey ||
-                        lastLoginPanel.masterKey ||
-                        null,
-                    isLocal: false,
-                };
-            }
-            return panels[0]; // default to local
-        };
-
-        // Custom sendOrEdit message helper
-        const sendOrEdit = async (
-            chatId,
-            text,
-            replyMarkup = null,
-            messageId = null,
-        ) => {
-            let res;
-            if (messageId) {
-                res = await fetchT(`${tgApi}/editMessageText`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        message_id: messageId,
-                        text: text,
-                        parse_mode: "Markdown",
-                        reply_markup: replyMarkup,
-                    }),
-                });
-                if (res.ok) return res;
-                try {
-                    const errBody = await res.json();
-                    if (
-                        errBody?.description?.includes(
-                            "message is not modified",
-                        )
-                    )
-                        return res;
-                } catch (e) {}
-            }
-            res = await fetchT(`${tgApi}/sendMessage`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    chat_id: chatId,
-                    text: text,
-                    parse_mode: "Markdown",
-                    reply_markup: replyMarkup,
-                }),
-            });
-            return res;
-        };
-
-        const getMainMenu = (activePanel, isAdmin = true) => {
-            const isPaused = sysConfig.isPaused || false;
-            const statusEmoji = isPaused ? "🔴" : "🟢";
-            const users = sysConfig.users || [];
-            const activeCount = users.filter(
-                (u) => !u.isPaused && (!u.expiryMs || Date.now() <= u.expiryMs),
-            ).length;
-            const pausedCount = users.filter(
-                (u) => u.isPaused && !u.disabledReason,
-            ).length;
-            const autoDisabledCount = users.filter(
-                (u) => u.isPaused && u.disabledReason,
-            ).length;
-            const isLocal = !activePanel || activePanel.isLocal;
-            const panelName = activePanel
-                ? activePanel.name
-                : sysConfig.name || "Main Panel";
-            const panelIndicator = isLocal
-                ? `🏠 ${panelName}`
-                : `🌐 ${panelName}`;
-            let text =
-                `${t("welcome")}\n\n` +
-                `━━━━━━━━━━━━━━━━\n` +
-                `📌 **${t("current_panel")}**: ${panelIndicator}\n` +
-                `⚡ **${t("status")}**: ${isPaused ? t("paused") : t("active")} ${statusEmoji}\n` +
-                `👥 **${t("users")}**: ${users.length} (${activeCount} ${t("count_active")}, ${pausedCount} ${t("count_paused")}, ${autoDisabledCount} ${t("count_disabled")})\n` +
-                `━━━━━━━━━━━━━━━━`;
-            const panelUrl = isLocal
-                ? `https://${hostName}/${encodeURI(sysConfig.apiRoute)}/dash`
-                : null;
-            const subUrl = `https://${hostName}/${sysConfig.apiRoute}`;
-            /** @type {any} */
-            const inline_keyboard = [];
-            if (isAdmin) {
-                inline_keyboard.push([
-                    { text: `👥 ${t("users")}`, callback_data: "subs_list:0" },
-                    {
-                        text: `🔍 ${t("search")}`,
-                        callback_data: "sub_search_init",
-                    },
-                ]);
-            }
-            inline_keyboard.push([
-                {
-                    text: `📊 ${t("dashboard")}`,
-                    callback_data: "sys_dashboard",
-                },
-                { text: `📈 ${t("statistics")}`, callback_data: "sys_stats" },
-            ]);
-            inline_keyboard.push([
-                {
-                    text: `🔗 ${t("btn_sub_link")}`,
-                    callback_data: "get_sub_link",
-                },
-            ]);
-            if (isAdmin) {
-                inline_keyboard.push([
-                    {
-                        text: `🚫 ${t("disabled_users")}`,
-                        callback_data: "subs_disabled:0",
-                    },
-                ]);
-                inline_keyboard.push([
-                    {
-                        text: `⚙️ ${t("tg_settings")}`,
-                        callback_data: "tg_settings_menu",
-                    },
-                    {
-                        text: `🔧 ${t("tg_advanced")}`,
-                        callback_data: "tg_advanced_menu",
-                    },
-                ]);
-                inline_keyboard.push([
-                    {
-                        text: `📋 ${t("tg_logs")}`,
-                        callback_data: "tg_logs_menu",
-                    },
-                ]);
-            }
-            inline_keyboard.push([
-                {
-                    text: `🌐 ${langCode === "fa" ? "English 🇺🇸" : "فارسی 🇮🇷"}`,
-                    callback_data: "sys_lang",
-                },
-                {
-                    text: isPaused
-                        ? `▶️ ${t("btn_resume")}`
-                        : `⏸️ ${t("btn_pause")}`,
-                    callback_data: "sys_toggle_status",
-                },
-            ]);
-            if (panelUrl) {
-                inline_keyboard.push([
-                    { text: `🔑 ${t("dash")}`, web_app: { url: panelUrl } },
-                    {
-                        text: `ℹ️ ${t("panel_info")}`,
-                        callback_data: "sys_panel_info",
-                    },
-                ]);
-                if (isAdmin) {
-                    inline_keyboard.push([
-                        {
-                            text: `🚨 ${t("panic")}`,
-                            callback_data: "sys_panic_init",
-                        },
-                    ]);
-                }
-            } else {
-                inline_keyboard.push([
-                    {
-                        text: `ℹ️ ${t("panel_info")}`,
-                        callback_data: "sys_panel_info",
-                    },
-                ]);
-            }
-            const kb = { inline_keyboard };
-            return { text, kb };
-        };
-
-        const getSubsList = (page = 0, usersList = null) => {
-            const users = usersList || sysConfig.users || [];
-            const itemsPerPage = 5;
-            const totalPages = Math.ceil(users.length / itemsPerPage);
-            const start = page * itemsPerPage;
-            const end = start + itemsPerPage;
-            const pageUsers = users.slice(start, end);
-
-            let text = `👥 **${t("users")}** (${t("lbl_page")} ${page + 1}/${Math.max(1, totalPages)})\n`;
-            text += `━━━━━━━━━━━━━━━━\n`;
-
-            if (users.length === 0) {
-                text += `⚠️ ${t("no_users")}\n`;
-            } else {
-                pageUsers.forEach((u, idx) => {
-                    text += `${start + idx + 1}. 👤 **${u.name}**\n   \`${u.id}\`\n`;
-                });
-            }
-            text += `━━━━━━━━━━━━━━━━`;
-
-            const inline_keyboard = [];
-            pageUsers.forEach((u) => {
-                inline_keyboard.push([
-                    {
-                        text: `👤 ${u.name}`,
-                        callback_data: `sub_detail:${u.id}`,
-                    },
-                ]);
-            });
-
-            const navRow = [];
-            if (page > 0) {
-                navRow.push({
-                    text: `⬅️ ${t("btn_back")}`,
-                    callback_data: `subs_list:${page - 1}`,
-                });
-            }
-            if (end < users.length) {
-                navRow.push({
-                    text: `${t("btn_next")} ➡️`,
-                    callback_data: `subs_list:${page + 1}`,
-                });
-            }
-            if (navRow.length > 0) {
-                inline_keyboard.push(navRow);
-            }
-
-            inline_keyboard.push([
-                { text: `➕ ${t("btn_add")}`, callback_data: "sub_add_init" },
-            ]);
-            inline_keyboard.push([
-                { text: t("btn_main_menu"), callback_data: "main_menu" },
-            ]);
-
-            return { text, kb: { inline_keyboard } };
-        };
-
-        const getSubDetail = (uuid, usersList = null) => {
-            const users = usersList || sysConfig.users || [];
-            const u = users.find((usr) => usr.id === uuid);
-            if (!u) {
-                return {
-                    text: "⚠️ User not found",
-                    kb: {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: t("btn_back"),
-                                    callback_data: "subs_list:0",
-                                },
-                            ],
-                        ],
-                    },
-                };
-            }
-
-            const sysU = sysUsageCache?.users?.[
-                u.id.replace(/-/g, "").toLowerCase()
-            ] || { reqs: 0, dReqs: 0, lastDay: "" };
-            const userReqs = sysU.reqs || 0;
-            const curDate = new Date().toISOString().split("T")[0];
-            const userDReqs = sysU.lastDay === curDate ? sysU.dReqs || 0 : 0;
-
-            const limitTotalTxt = u.limitTotalReq
-                ? `${u.limitTotalReq}`
-                : t("unlimited");
-            const limitDailyTxt = u.limitDailyReq
-                ? `${u.limitDailyReq}`
-                : t("unlimited");
-            const usedGB = (usageTotalBytes(sysU) / 1073741824).toFixed(2);
-            const limitGB = u.limitTotalReq
-                ? (limitReqToBytes(u.limitTotalReq) / 1073741824).toFixed(2)
-                : t("unlimited");
-
-            let expTxt = t("unlimited");
-            let isExp = false;
-            let daysLeft = t("unlimited");
-            if (u.expiryMs) {
-                const date = new Date(u.expiryMs);
-                expTxt = date.toLocaleDateString();
-                const remDays = Math.ceil((u.expiryMs - Date.now()) / 86400000);
-                daysLeft = remDays >= 0 ? `${remDays}` : "0";
-                if (Date.now() > u.expiryMs) {
-                    expTxt += ` (${t("dash_expired")} 🔴)`;
-                    isExp = true;
-                }
-            }
-
-            const statusEmoji = u.isPaused ? "⏸️" : isExp ? "🔴" : "🟢";
-            const statusText = u.isPaused
-                ? t("paused")
-                : isExp
-                  ? t("dash_expired")
-                  : t("active");
-            const subSync = `https://${hostName}/${sysConfig.apiRoute}?sub=${encodeURIComponent(u.name)}`;
-            const maxCfgTxt = u.maxConfigs || t("unlimited");
-            const notesTxt = u.notes || t("lbl_none");
-            const modeTxt = u.userMode
-                ? u.userMode === "alpha"
-                    ? "Alpha (V)"
-                    : u.userMode === "beta"
-                      ? "Beta (T)"
-                      : "Both"
-                : t("unlimited");
-            const portsTxt = u.userPorts || t("unlimited");
-            const cleanIpsTxt = u.cleanIp
-                ? u.cleanIp.substring(0, 30) +
-                  (u.cleanIp.length > 30 ? "..." : "")
-                : "—";
-            const proxyIpsTxt = u.proxyIp
-                ? u.proxyIp.substring(0, 30) +
-                  (u.proxyIp.length > 30 ? "..." : "")
-                : "—";
-            const nodesTxt = u.userNodes
-                ? u.userNodes.substring(0, 30) +
-                  (u.userNodes.length > 30 ? "..." : "")
-                : "—";
-            const nat64Txt = u.nat64 || "—";
-
-            let text = `👤 **${t("sub_info")}**\n`;
-            text += `━━━━━━━━━━━━━━━━\n`;
-            text += `📛 **${t("name")}**: ${u.name}\n`;
-            text += `🆔 **UUID**: \`${u.id}\`\n`;
-            text += `🚦 **${t("lbl_status")}**: ${statusEmoji} ${statusText}\n`;
-            text += `📊 **${t("total")}**: ${usedGB} GB / ${limitGB} GB (${userReqs} reqs)\n`;
-            text += `⏱ **${t("daily")}**: ${userDReqs} / ${limitDailyTxt}\n`;
-            text += `📅 **${t("expiry")}**: ${expTxt}\n`;
-            text += `⏳ **${t("days")}**: ${daysLeft}\n`;
-            text += `📡 **${t("tg_u_mode")}**: ${modeTxt}\n`;
-            text += `🔌 **${t("tg_u_ports")}**: ${portsTxt}\n`;
-            text += `📱 **${t("device_limit")}**: ${maxCfgTxt}\n`;
-            text += `🧹 **${t("tg_u_clean_ips")}**: ${cleanIpsTxt}\n`;
-            text += `🔗 **${t("tg_u_proxy_ips")}**: ${proxyIpsTxt}\n`;
-            text += `🖥️ **${t("tg_u_nodes")}**: ${nodesTxt}\n`;
-            text += `🌐 **${t("tg_u_nat64")}**: ${nat64Txt}\n`;
-            text += `🔗 **${t("tg_u_conn_limit")}**: ${u.connLimit || t("unlimited")}\n`;
-            text += `🎛 **${t("tg_u_panel_url")}**: ${u.userPanelUrl || t("unlimited")}\n`;
-            text += `📝 **${t("notes")}**: ${notesTxt}\n`;
-            text += `━━━━━━━━━━━━━━━━\n`;
-            text += `🔗 **${t("lbl_subscription")}:**\n\`${subSync}\``;
-
-            const kb = {
-                inline_keyboard: [
-                    [
-                        {
-                            text: u.isPaused
-                                ? `▶️ ${t("btn_resume")}`
-                                : `⏸️ ${t("btn_pause")}`,
-                            callback_data: `sub_toggle:${u.id}`,
-                        },
-                        {
-                            text: `🗑️ ${t("btn_del")}`,
-                            callback_data: `sub_del_init:${u.id}`,
-                        },
-                    ],
-                    [
-                        {
-                            text: `✏️ ${t("btn_edit_name")}`,
-                            callback_data: `sub_edit_name_init:${u.id}`,
-                        },
-                        {
-                            text: `⚙️ ${t("btn_edit_limits")}`,
-                            callback_data: `sub_edit_limits_init:${u.id}`,
-                        },
-                    ],
-                    [
-                        {
-                            text: `🔄 ${t("reset_traffic")}`,
-                            callback_data: `sub_reset_traffic:${u.id}`,
-                        },
-                        {
-                            text: `📅 ${t("extend_expiry")}`,
-                            callback_data: `sub_extend_init:${u.id}`,
-                        },
-                    ],
-                    [
-                        {
-                            text: `📝 ${t("notes")}`,
-                            callback_data: `sub_edit_notes_init:${u.id}`,
-                        },
-                        {
-                            text: `📱 ${t("device_limit")}`,
-                            callback_data: `sub_edit_device_init:${u.id}`,
-                        },
-                    ],
-                    [
-                        {
-                            text: t("btn_back_to_list"),
-                            callback_data: "subs_list:0",
-                        },
-                    ],
-                ],
-            };
-            return { text, kb };
-        };
-
-        if (update.callback_query) {
-            const cb = update.callback_query;
-            const chatId = cb.message?.chat?.id;
-            const messageId = cb.message?.message_id;
-            const data = cb.data;
-
-            if (chatId) {
-                if (!isAuthorized) {
-                    await fetchT(`${tgApi}/answerCallbackQuery`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            callback_query_id: cb.id,
-                            text: t("access_denied"),
-                            show_alert: true,
-                        }),
-                    });
-                    return new Response("OK", { status: 200 });
-                }
-
-                // Get active panel from last login signal
-                const activePanel = getActivePanel();
-                const isRemotePanel = activePanel && !activePanel.isLocal;
-
-                // Helper to fetch users for the active panel
-                const getPanelUsers = async () => {
-                    if (isRemotePanel) {
-                        const res = await fetchRemotePanelUsers(activePanel);
-                        return res.success ? res.users || [] : null;
-                    }
-                    return sysConfig.users || [];
-                };
-
-                // Clear step state on callback query
-                tgState[chatId] = null;
-                ctx?.waitUntil(
-                    d1Put(env, "tg_bot_state", JSON.stringify(tgState)).catch(
-                        () => {},
-                    ),
-                );
-
-                let answerText = null;
-
-                if (data === "main_menu") {
-                    const menu = getMainMenu(activePanel, isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb, messageId);
-                } else if (data === "sys_lang") {
-                    sysConfig.tgBotLang = langCode === "fa" ? "en" : "fa";
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    const menu = getMainMenu(activePanel, isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb, messageId);
-                } else if (data === "sys_toggle_status") {
-                    sysConfig.isPaused = !sysConfig.isPaused;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    const menu = getMainMenu(activePanel, isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb, messageId);
-                } else if (data === "sys_metrics") {
-                    let usageStr = t("unlimited");
-                    if (sysConfig.cfAccountId && sysConfig.cfApiToken) {
-                        const reqs = await fetchCloudflareUsage(
-                            sysConfig.cfAccountId,
-                            sysConfig.cfApiToken,
-                        );
-                        if (reqs !== null) {
-                            const pct = ((reqs / 100000) * 100).toFixed(2);
-                            usageStr = `${reqs}/100000 (${pct}%)`;
-                        }
-                    }
-                    const upSeconds = Math.floor(
-                        (Date.now() - isolateStartTime) / 1000,
-                    );
-                    const dh = Math.floor(upSeconds / 3600);
-                    const dm = Math.floor((upSeconds % 3600) / 60);
-
-                    let text = `📡 **${t("metrics")}**\n`;
-                    text += `━━━━━━━━━━━━━━━━\n`;
-                    text += `⏱ **${t("uptime")}**: ${dh}h ${dm}m\n`;
-                    text += `🔌 **${t("streams")}**: ${activeConnections}\n`;
-                    text += `📊 **Cloudflare API Usage**: ${usageStr}\n`;
-                    text += `━━━━━━━━━━━━━━━━`;
-
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("subs_list:")) {
-                    const page = parseInt(data.replace("subs_list:", "")) || 0;
-                    const panelUsers = await getPanelUsers();
-                    if (panelUsers === null && isRemotePanel) {
-                        await sendOrEdit(chatId, t("msg_panel_error"), {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: t("btn_main_menu"),
-                                        callback_data: "main_menu",
-                                    },
-                                ],
-                            ],
-                        });
-                    } else {
-                        const list = getSubsList(page, panelUsers);
-                        await sendOrEdit(chatId, list.text, list.kb, messageId);
-                    }
-                } else if (data.startsWith("sub_detail:")) {
-                    const uuid = data.replace("sub_detail:", "");
-                    const panelUsers = await getPanelUsers();
-                    if (panelUsers === null && isRemotePanel) {
-                        await sendOrEdit(chatId, t("msg_panel_error"), {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: t("btn_main_menu"),
-                                        callback_data: "main_menu",
-                                    },
-                                ],
-                            ],
-                        });
-                    } else {
-                        const detail = getSubDetail(uuid, panelUsers);
-                        await sendOrEdit(
-                            chatId,
-                            detail.text,
-                            detail.kb,
-                            messageId,
-                        );
-                    }
-                } else if (data.startsWith("sub_toggle:")) {
-                    const uuid = data.replace("sub_toggle:", "");
-                    if (isRemotePanel) {
-                        await remotePanelToggleUser(activePanel, uuid);
-                    } else if (sysConfig.users) {
-                        const u = sysConfig.users.find(
-                            (usr) => usr.id === uuid,
-                        );
-                        if (u) {
-                            u.isPaused = !u.isPaused;
-                            await cachedD1Put(
-                                env,
-                                "sys_config",
-                                JSON.stringify(sysConfig),
-                            );
-                        }
-                    }
-                    const panelUsers = await getPanelUsers();
-                    const detail = getSubDetail(uuid, panelUsers);
-                    await sendOrEdit(chatId, detail.text, detail.kb, messageId);
-                } else if (data.startsWith("sub_del_init:")) {
-                    const uuid = data.replace("sub_del_init:", "");
-                    const panelUsers = await getPanelUsers();
-                    const u = panelUsers?.find((usr) => usr.id === uuid);
-                    const name = u ? u.name : "";
-                    const text = `${t("msg_confirm_del")}\n\n👤 **${name}**`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `✅ ${t("btn_confirm")}`,
-                                    callback_data: `sub_del_confirm:${uuid}`,
-                                },
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: `sub_detail:${uuid}`,
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_del_confirm:")) {
-                    const uuid = data.replace("sub_del_confirm:", "");
-                    if (isRemotePanel) {
-                        await remotePanelWriteAction(
-                            activePanel,
-                            "DELETE",
-                            uuid,
-                        );
-                    } else if (sysConfig.users) {
-                        sysConfig.users = sysConfig.users.filter(
-                            (usr) => usr.id !== uuid,
-                        );
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                    }
-                    const successText = `✅ ${t("msg_deleted")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: t("btn_back"),
-                                    callback_data: "subs_list:0",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, successText, kb, messageId);
-                } else if (data === "sub_add_init") {
-                    tgState[chatId] = { step: "sub_add_name" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const text = `➕ ${t("msg_enter_name")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: "subs_list:0",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_edit_name_init:")) {
-                    const uuid = data.replace("sub_edit_name_init:", "");
-                    tgState[chatId] = { step: `sub_edit_name:${uuid}` };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const text = `✏️ ${t("msg_enter_name")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: `sub_detail:${uuid}`,
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_edit_limits_init:")) {
-                    const uuid = data.replace("sub_edit_limits_init:", "");
-                    tgState[chatId] = { step: `sub_edit_limits:${uuid}` };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const text = `⚙️ ${t("msg_enter_limits")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `♾️ Skip (Unlimited)`,
-                                    callback_data: `sub_unlimit_cb:${uuid}`,
-                                },
-                            ],
-                            [
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: `sub_detail:${uuid}`,
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_unlimit_cb:")) {
-                    const uuid = data.replace("sub_unlimit_cb:", "");
-                    if (isRemotePanel) {
-                        await remotePanelWriteAction(activePanel, "PUT", uuid, {
-                            key: activePanel.apiKey,
-                            trafficLimit: 0,
-                            dailyLimit: 0,
-                            expiryDays: 0,
-                        });
-                    } else if (sysConfig.users) {
-                        const u = sysConfig.users.find(
-                            (usr) => usr.id === uuid,
-                        );
-                        if (u) {
-                            u.limitTotalReq = null;
-                            u.limitDailyReq = null;
-                            u.expiryMs = null;
-                            await cachedD1Put(
-                                env,
-                                "sys_config",
-                                JSON.stringify(sysConfig),
-                            );
-                        }
-                    }
-                    const panelUsers = await getPanelUsers();
-                    const detail = getSubDetail(uuid, panelUsers);
-                    await sendOrEdit(chatId, detail.text, detail.kb, messageId);
-                } else if (data === "sub_add_unlimited_skip") {
-                    let stateName = "Subscriber";
-                    try {
-                        const savedStateRaw = await d1Get(env, "tg_bot_state");
-                        if (savedStateRaw) {
-                            const stObj = JSON.parse(savedStateRaw);
-                            if (stObj[chatId] && stObj[chatId].name) {
-                                stateName = stObj[chatId].name;
-                            }
-                        }
-                    } catch (e) {}
-
-                    const newUuid = crypto.randomUUID();
-                    if (isRemotePanel) {
-                        const res = await remotePanelWriteAction(
-                            activePanel,
-                            "POST",
-                            null,
-                            { key: activePanel.apiKey, name: stateName },
-                        );
-                        if (res.success && res.user) {
-                            const detail = getSubDetail(res.user.id, [
-                                res.user,
-                            ]);
-                            await sendOrEdit(
-                                chatId,
-                                `✅ ${t("msg_added")}\n\n${detail.text}`,
-                                detail.kb,
-                                messageId,
-                            );
-                        } else {
-                            await sendOrEdit(chatId, t("msg_panel_error"), {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: t("btn_main_menu"),
-                                            callback_data: "main_menu",
-                                        },
-                                    ],
-                                ],
-                            });
-                        }
-                    } else {
-                        if (!sysConfig.users) sysConfig.users = [];
-                        sysConfig.users.push({
-                            id: newUuid,
-                            name: stateName,
-                            limitTotalReq: null,
-                            limitDailyReq: null,
-                            expiryMs: null,
-                            createdAt: Date.now(),
-                        });
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        const detail = getSubDetail(newUuid);
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("msg_added")}\n\n${detail.text}`,
-                            detail.kb,
-                            messageId,
-                        );
-                    }
-                    tgState[chatId] = null;
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                } else if (data === "sys_panic_init") {
-                    const text = `${t("msg_confirm_panic")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `🚨 YES PANIC 🚨`,
-                                    callback_data: "sys_panic_confirm",
-                                },
-                                {
-                                    text: `❌ No, Cancel`,
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data === "sys_panic_confirm") {
-                    sysConfig.apiRoute = Array.from(
-                        crypto.getRandomValues(new Uint8Array(8)),
-                    )
-                        .map((b) => b.toString(16).padStart(2, "0"))
-                        .join("");
-                    sysConfig.isPaused = true;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    const successText = `${t("msg_panic")}\n\n🔑 New Secret Path Randomized. All old sessions revoked.`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, successText, kb, messageId);
-                } else if (data === "sys_dashboard") {
-                    let users,
-                        activeCount,
-                        pausedCount,
-                        expiredCount,
-                        autoDisabledCount;
-                    if (isRemotePanel) {
-                        const statsRes =
-                            await fetchRemotePanelStats(activePanel);
-                        if (statsRes.success && statsRes.stats) {
-                            const s = statsRes.stats;
-                            users = [];
-                            activeCount = s.users?.active || 0;
-                            pausedCount = s.users?.paused || 0;
-                            expiredCount = s.users?.expired || 0;
-                            autoDisabledCount = s.users?.autoDisabled || 0;
-                        } else {
-                            const panelUsers = await getPanelUsers();
-                            users = panelUsers || [];
-                            activeCount = users.filter(
-                                (u) =>
-                                    !u.isPaused &&
-                                    (!u.expiryMs || Date.now() <= u.expiryMs),
-                            ).length;
-                            pausedCount = users.filter(
-                                (u) => u.isPaused && !u.disabledReason,
-                            ).length;
-                            expiredCount = users.filter(
-                                (u) =>
-                                    u.expiryMs &&
-                                    Date.now() > u.expiryMs &&
-                                    !u.isPaused,
-                            ).length;
-                            autoDisabledCount = users.filter(
-                                (u) => u.isPaused && u.disabledReason,
-                            ).length;
-                        }
-                    } else {
-                        users = sysConfig.users || [];
-                        activeCount = users.filter(
-                            (u) =>
-                                !u.isPaused &&
-                                (!u.expiryMs || Date.now() <= u.expiryMs),
-                        ).length;
-                        pausedCount = users.filter(
-                            (u) => u.isPaused && !u.disabledReason,
-                        ).length;
-                        expiredCount = users.filter(
-                            (u) =>
-                                u.expiryMs &&
-                                Date.now() > u.expiryMs &&
-                                !u.isPaused,
-                        ).length;
-                        autoDisabledCount = users.filter(
-                            (u) => u.isPaused && u.disabledReason,
-                        ).length;
-                    }
-                    let dashText = `📊 **${t("dashboard")}**\n`;
-                    dashText += `━━━━━━━━━━━━━━━━\n`;
-                    dashText += `📌 **${t("current_panel")}**: ${activePanel.isLocal ? "🏠" : "🌐"} ${activePanel.name}\n`;
-                    dashText += `━━━━━━━━━━━━━━━━\n`;
-                    dashText += `👥 **${t("dash_total")}**: ${Array.isArray(users) ? users.length : activeCount + pausedCount + expiredCount + autoDisabledCount}\n`;
-                    dashText += `🟢 **${t("dash_active")}**: ${activeCount}\n`;
-                    dashText += `⏸️ **${t("dash_paused")}**: ${pausedCount}\n`;
-                    dashText += `🔴 **${t("dash_expired")}**: ${expiredCount}\n`;
-                    dashText += `🚫 **${t("dash_auto_disabled")}**: ${autoDisabledCount}\n`;
-                    if (!isRemotePanel) {
-                        const upSeconds = Math.floor(
-                            (Date.now() - isolateStartTime) / 1000,
-                        );
-                        const dh = Math.floor(upSeconds / 3600);
-                        const dm = Math.floor((upSeconds % 3600) / 60);
-                        dashText += `⏱ **${t("uptime")}**: ${dh}h ${dm}m\n`;
-                        dashText += `🔌 **${t("streams")}**: ${activeConnections}\n`;
-                        dashText += `⚡ **System**: ${sysConfig.isPaused ? t("paused") : t("active")}\n`;
-                    }
-                    dashText += `━━━━━━━━━━━━━━━━`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, dashText, kb, messageId);
-                } else if (data === "sys_stats") {
-                    let users, totalReqs, dailyReqs;
-                    let totalBytesSum = 0,
-                        dailyBytesSum = 0;
-                    if (isRemotePanel) {
-                        const statsRes =
-                            await fetchRemotePanelStats(activePanel);
-                        if (statsRes.success && statsRes.stats) {
-                            const s = statsRes.stats;
-                            users = [];
-                            totalReqs = s.traffic?.totalRequests || 0;
-                            dailyReqs = s.traffic?.dailyRequests || 0;
-                        } else {
-                            const panelUsers = await getPanelUsers();
-                            users = panelUsers || [];
-                            totalReqs = 0;
-                            dailyReqs = 0;
-                        }
-                    } else {
-                        users = sysConfig.users || [];
-                        totalReqs = 0;
-                        dailyReqs = 0;
-                        const todayDate = new Date()
-                            .toISOString()
-                            .split("T")[0];
-                        users.forEach((u) => {
-                            const idClean = u.id
-                                .replace(/-/g, "")
-                                .toLowerCase();
-                            const sysU = sysUsageCache?.users?.[idClean] || {
-                                reqs: 0,
-                                dReqs: 0,
-                                lastDay: "",
-                            };
-                            totalReqs += sysU.reqs || 0;
-                            if (sysU.lastDay === todayDate)
-                                dailyReqs += sysU.dReqs || 0;
-                            totalBytesSum += usageTotalBytes(sysU);
-                            dailyBytesSum += usageDailyBytes(sysU, todayDate);
-                        });
-                    }
-                    let statsText = `📈 **${t("stats_title")}**\n`;
-                    statsText += `━━━━━━━━━━━━━━━━\n`;
-                    statsText += `📌 **${t("current_panel")}**: ${activePanel.isLocal ? "🏠" : "🌐"} ${activePanel.name}\n`;
-                    statsText += `━━━━━━━━━━━━━━━━\n`;
-                    statsText += `👥 **${t("dash_total")}**: ${Array.isArray(users) ? users.length : "N/A"}\n`;
-                    statsText += `📊 **${t("total_traffic")}**: ${(totalBytesSum / 1073741824).toFixed(2)} GB\n`;
-                    statsText += `📅 **${t("daily_traffic")}**: ${(dailyBytesSum / 1073741824).toFixed(2)} GB\n`;
-                    if (!isRemotePanel) {
-                        const upSeconds = Math.floor(
-                            (Date.now() - isolateStartTime) / 1000,
-                        );
-                        const dh = Math.floor(upSeconds / 3600);
-                        const dm = Math.floor((upSeconds % 3600) / 60);
-                        statsText += `⏱ **${t("tg_uptime")}**: ${dh}h ${dm}m\n`;
-                        statsText += `🔌 **${t("tg_conns")}**: ${activeConnections}\n`;
-                        statsText += `📦 **${t("tg_version")}**: v${CURRENT_VERSION}\n`;
-                    }
-                    statsText += `━━━━━━━━━━━━━━━━`;
-                    if (sysConfig.cfAccountId && sysConfig.cfApiToken) {
-                        const reqs = await fetchCloudflareUsage(
-                            sysConfig.cfAccountId,
-                            sysConfig.cfApiToken,
-                        );
-                        if (reqs !== null) {
-                            const pct = ((reqs / 100000) * 100).toFixed(2);
-                            statsText += `\n☁️ **Cloudflare API**: ${reqs}/100000 (${pct}%)`;
-                        }
-                    }
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `🔄 ${t("btn_update_usage")}`,
-                                    callback_data: "sys_stats",
-                                },
-                            ],
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, statsText, kb, messageId);
-                } else if (data === "sys_panel_info") {
-                    let infoText = `ℹ️ **${t("panel_info")}**\n`;
-                    infoText += `━━━━━━━━━━━━━━━━\n`;
-                    infoText += `📌 **${t("current_panel")}**: ${activePanel.isLocal ? "🏠" : "🌐"} ${activePanel.name}\n`;
-                    if (activePanel.isLocal) {
-                        infoText += `🌐 **Host**: ${hostName}\n`;
-                        infoText += `🔑 **API Route**: \`${sysConfig.apiRoute}\`\n`;
-                        infoText += `📡 **Mode**: ${sysConfig.mode || "alpha"}\n`;
-                        infoText += `🔒 **Ports**: ${sysConfig.socketPorts || "443"}\n`;
-                    } else {
-                        infoText += `🌐 **Host**: ${activePanel.host}\n`;
-                        infoText += `🔑 **API Route**: \`${activePanel.apiRoute}\`\n`;
-                    }
-                    infoText += `📱 **Version**: ${CURRENT_VERSION}\n`;
-                    infoText += `━━━━━━━━━━━━━━━━`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, infoText, kb, messageId);
-                } else if (data.startsWith("subs_disabled:")) {
-                    const panelUsers = await getPanelUsers();
-                    const users = panelUsers || [];
-                    const disabledUsers = users.filter((u) => u.isPaused);
-                    if (disabledUsers.length === 0) {
-                        const kb = {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: t("btn_main_menu"),
-                                        callback_data: "main_menu",
-                                    },
-                                ],
-                            ],
-                        };
-                        await sendOrEdit(
-                            chatId,
-                            `🚫 ${t("msg_no_disabled")}`,
-                            kb,
-                            messageId,
-                        );
-                    } else {
-                        const page =
-                            parseInt(data.replace("subs_disabled:", "")) || 0;
-                        const itemsPerPage = 5;
-                        const start = page * itemsPerPage;
-                        const end = start + itemsPerPage;
-                        const pageUsers = disabledUsers.slice(start, end);
-                        let text = `🚫 **${t("disabled_users")}** (${disabledUsers.length})\n━━━━━━━━━━━━━━━━\n`;
-                        const inline_keyboard = [];
-                        pageUsers.forEach((u) => {
-                            const reason = u.disabledReason || t("paused");
-                            text += `👤 **${u.name}**\n   ${reason}\n`;
-                            inline_keyboard.push([
-                                {
-                                    text: `▶️ ${u.name}`,
-                                    callback_data: `sub_toggle:${u.id}`,
-                                },
-                            ]);
-                        });
-                        const navRow = [];
-                        if (page > 0)
-                            navRow.push({
-                                text: `⬅️ ${t("btn_back")}`,
-                                callback_data: `subs_disabled:${page - 1}`,
-                            });
-                        if (end < disabledUsers.length)
-                            navRow.push({
-                                text: `${t("btn_next")} ➡️`,
-                                callback_data: `subs_disabled:${page + 1}`,
-                            });
-                        if (navRow.length > 0) inline_keyboard.push(navRow);
-                        inline_keyboard.push([
-                            {
-                                text: t("btn_main_menu"),
-                                callback_data: "main_menu",
-                            },
-                        ]);
-                        await sendOrEdit(
-                            chatId,
-                            text,
-                            { inline_keyboard },
-                            messageId,
-                        );
-                    }
-                } else if (data === "sub_search_init") {
-                    tgState[chatId] = { step: "sub_search" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const text = `🔍 ${t("msg_enter_search")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_reset_traffic:")) {
-                    const uuid = data.replace("sub_reset_traffic:", "");
-                    if (isRemotePanel) {
-                        await remotePanelResetTraffic(activePanel, uuid);
-                    } else {
-                        if (!sysUsageCache) sysUsageCache = { users: {} };
-                        if (!sysUsageCache.users) sysUsageCache.users = {};
-                        const uuidClean = uuid.replace(/-/g, "").toLowerCase();
-            if (sysUsageCache.users[uuidClean]) {
-                sysUsageCache.users[uuidClean].reqs = 0;
-                sysUsageCache.users[uuidClean].dReqs = 0;
-                sysUsageCache.users[uuidClean].bytes = 0;
-                sysUsageCache.users[uuidClean].dBytes = 0;
-            } else {
-                sysUsageCache.users[uuidClean] = {
-                    reqs: 0,
-                    dReqs: 0,
-                    bytes: 0,
-                    dBytes: 0,
-                    lastDay: new Date().toISOString().split("T")[0],
-                };
-            }
-                        await cachedD1Put(
-                            env,
-                            "sys_usage",
-                            JSON.stringify(sysUsageCache),
-                        );
-                    }
-                    const panelUsers = await getPanelUsers();
-                    const detail = getSubDetail(uuid, panelUsers);
-                    await sendOrEdit(
-                        chatId,
-                        `✅ ${t("msg_traffic_reset")}\n\n${detail.text}`,
-                        detail.kb,
-                        messageId,
-                    );
-                } else if (data.startsWith("sub_extend_init:")) {
-                    const uuid = data.replace("sub_extend_init:", "");
-                    tgState[chatId] = { step: `sub_extend_days:${uuid}` };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const text = `📅 ${t("msg_enter_extend_days")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: `sub_detail:${uuid}`,
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_edit_notes_init:")) {
-                    const uuid = data.replace("sub_edit_notes_init:", "");
-                    tgState[chatId] = { step: `sub_edit_notes:${uuid}` };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const text = `📝 ${t("msg_enter_notes")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: `sub_detail:${uuid}`,
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_edit_device_init:")) {
-                    const uuid = data.replace("sub_edit_device_init:", "");
-                    tgState[chatId] = { step: `sub_edit_device:${uuid}` };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const text = `📱 ${t("msg_enter_device_limit")}`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `♾️ Unlimited`,
-                                    callback_data: `sub_device_unlimited:${uuid}`,
-                                },
-                            ],
-                            [
-                                {
-                                    text: `❌ ${t("btn_cancel")}`,
-                                    callback_data: `sub_detail:${uuid}`,
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data.startsWith("sub_device_unlimited:")) {
-                    const uuid = data.replace("sub_device_unlimited:", "");
-                    if (isRemotePanel) {
-                        await remotePanelWriteAction(activePanel, "PUT", uuid, {
-                            key: activePanel.apiKey,
-                            maxConfigs: null,
-                        });
-                    } else if (sysConfig.users) {
-                        const u = sysConfig.users.find(
-                            (usr) => usr.id === uuid,
-                        );
-                        if (u) {
-                            u.maxConfigs = null;
-                            await cachedD1Put(
-                                env,
-                                "sys_config",
-                                JSON.stringify(sysConfig),
-                            );
-                        }
-                    }
-                    const panelUsers = await getPanelUsers();
-                    const detail = getSubDetail(uuid, panelUsers);
-                    await sendOrEdit(
-                        chatId,
-                        `✅ ${t("status_updated")}`,
-                        detail.kb,
-                        messageId,
-                    );
-                } else if (data === "get_sub_link") {
-                    const subUrl = `https://${hostName}/${sysConfig.apiRoute}`;
-                    await fetchT(`${tgApi}/sendMessage`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            chat_id: chatId,
-                            text: `\`${subUrl}\``,
-                            parse_mode: "Markdown",
-                        }),
-                    });
-                    answerText = t("sub_link_sent");
-                } else if (data === "tg_settings_menu") {
-                    const modeTxt =
-                        sysConfig.mode === "alpha"
-                            ? "Alpha (V)"
-                            : sysConfig.mode === "beta"
-                              ? "Beta (T)"
-                              : "Both";
-                    const portsTxt = sysConfig.socketPorts || "443";
-                    const passTxt = sysConfig.masterKey || "admin";
-                    const dnsTxt = sysConfig.resolveIp || "1.1.1.1";
-                    const relayTxt = sysConfig.backupRelay || "—";
-                    const tfoTxt = sysConfig.enableOpt1 ? "✅" : "❌";
-                    const echTxt = sysConfig.enableOpt2 ? "✅" : "❌";
-                    const pauseTxt = sysConfig.isPaused ? "🔴 ON" : "🟢 OFF";
-                    const silentTxt = sysConfig.silentAlerts ? "✅" : "❌";
-                    const autoUpTxt = sysConfig.autoUpdate ? "✅" : "❌";
-                    const directTxt = sysConfig.enableDirectConfigs
-                        ? "✅"
-                        : "❌";
-                    const nat64Txt = sysConfig.nat64Prefix || "—";
-                    let text = `⚙️ **${t("tg_sys_settings")}**\n━━━━━━━━━━━━━━━━\n`;
-                    text += `📡 ${t("tg_proto")}: **${modeTxt}**\n`;
-                    text += `🔌 ${t("tg_ports")}: \`${portsTxt}\`\n`;
-                    text += `🔑 ${t("tg_pass")}: \`${passTxt}\`\n`;
-                    text += `🌐 ${t("tg_dns")}: \`${dnsTxt}\`\n`;
-                    text += `🔗 ${t("tg_relay")}: \`${relayTxt}\`\n`;
-                    text += `⚡ ${t("tg_tfo")}: ${tfoTxt} | ECH: ${echTxt}\n`;
-                    text += `🔇 ${t("tg_silent")}: ${silentTxt}\n`;
-                    text += `🛑 ${t("tg_pause")}: ${pauseTxt}\n`;
-                    text += `🔄 ${t("tg_auto_update")}: ${autoUpTxt}\n`;
-                    text += `🔀 ${t("tg_direct")}: ${directTxt}\n`;
-                    text += `🌐 ${t("tg_nat64")}: \`${nat64Txt}\`\n`;
-                    text += `━━━━━━━━━━━━━━━━`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `📡 ${t("tg_proto")}`,
-                                    callback_data: "tg_edit_proto",
-                                },
-                                {
-                                    text: `🔌 ${t("tg_ports")}`,
-                                    callback_data: "tg_edit_ports",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `🔑 ${t("tg_pass")}`,
-                                    callback_data: "tg_edit_pass",
-                                },
-                                {
-                                    text: `🌐 ${t("tg_dns")}`,
-                                    callback_data: "tg_edit_dns",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `🔗 ${t("tg_relay")}`,
-                                    callback_data: "tg_edit_relay",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `⚡ ${t("tg_tfo")}`,
-                                    callback_data: "tg_toggle_tfo",
-                                },
-                                { text: `ECH`, callback_data: "tg_toggle_ech" },
-                            ],
-                            [
-                                {
-                                    text: `${t("tg_silent")}`,
-                                    callback_data: "tg_toggle_silent",
-                                },
-                                {
-                                    text: `${t("tg_pause")}`,
-                                    callback_data: "tg_toggle_pause2",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `🔄 ${t("tg_auto_update")}`,
-                                    callback_data: "tg_toggle_auto_update",
-                                },
-                                {
-                                    text: `🔀 ${t("tg_direct")}`,
-                                    callback_data: "tg_toggle_direct",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `🌐 ${t("tg_nat64")}`,
-                                    callback_data: "tg_edit_nat64",
-                                },
-                            ],
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data === "tg_advanced_menu") {
-                    const cleanTxt = sysConfig.cleanIps
-                        ? sysConfig.cleanIps.substring(0, 40) +
-                          (sysConfig.cleanIps.length > 40 ? "..." : "")
-                        : "—";
-                    const lpUrls = (sysConfig.linkedPanels || []).map(p => p.url).filter(Boolean);
-                    const nodesTxt = lpUrls.length > 0
-                        ? lpUrls.join(", ").substring(0, 40) +
-                          (lpUrls.join(", ").length > 40 ? "..." : "")
-                        : "—";
-                    const strategyTxt = sysConfig.nameStrategy || "default";
-                    const prefixTxt = sysConfig.namePrefix || "Core";
-                    const maintenanceTxt = sysConfig.maintenanceHost
-                        ? sysConfig.maintenanceHost.substring(0, 30) + "..."
-                        : "—";
-                    let text = `🔧 **${t("tg_adv_settings")}**\n━━━━━━━━━━━━━━━━\n`;
-                    text += `🧹 ${t("tg_clean_ips")}: \`${cleanTxt}\`\n`;
-                    text += `🖥️ ${t("tg_nodes")}: \`${nodesTxt}\`\n`;
-                    text += `📝 ${t("tg_strategy")}: \`${strategyTxt}\`\n`;
-                    text += `🏷️ ${t("tg_prefix")}: \`${prefixTxt}\`\n`;
-                    text += `🎭 ${t("tg_maintenance")}: \`${maintenanceTxt}\`\n`;
-                    text += `━━━━━━━━━━━━━━━━`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `🧹 ${t("tg_clean_ips")}`,
-                                    callback_data: "tg_edit_clean_ips",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `🖥️ ${t("tg_nodes")}`,
-                                    callback_data: "tg_edit_nodes",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `📝 ${t("tg_strategy")}`,
-                                    callback_data: "tg_edit_strategy",
-                                },
-                                {
-                                    text: `🏷️ ${t("tg_prefix")}`,
-                                    callback_data: "tg_edit_prefix",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `🎭 ${t("tg_maintenance")}`,
-                                    callback_data: "tg_edit_maintenance",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `🤖 ${t("tg_tg_settings")}`,
-                                    callback_data: "tg_edit_tg_settings",
-                                },
-                            ],
-                            [
-                                {
-                                    text: `☁️ ${t("tg_cf_settings")}`,
-                                    callback_data: "tg_edit_cf_settings",
-                                },
-                            ],
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data === "tg_logs_menu") {
-                    let logs = [];
-                    if (env.IOT_DB) {
-                        const stored = await d1Get(env, "sys_logs");
-                        if (stored) logs = JSON.parse(stored);
-                    }
-                    let text = `📋 **${t("tg_logs")}**\n━━━━━━━━━━━━━━━━\n`;
-                    if (logs.length === 0) {
-                        text += `ℹ️ ${t("tg_log_empty")}\n`;
-                    } else {
-                        logs.slice(0, 10).forEach((log, i) => {
-                            const time = new Date(log.ts).toLocaleString();
-                            text += `${i + 1}. ${t("tg_log_entry")} **${log.type}**\n   ${log.detail}\n   📅 ${time}\n`;
-                        });
-                        if (logs.length > 10)
-                            text += `\n... ${logs.length - 10} more entries`;
-                    }
-                    text += `\n━━━━━━━━━━━━━━━━`;
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: `🔄 ${t("btn_update_usage")}`,
-                                    callback_data: "tg_logs_menu",
-                                },
-                            ],
-                            [
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(chatId, text, kb, messageId);
-                } else if (data === "tg_toggle_tfo") {
-                    sysConfig.enableOpt1 = !sysConfig.enableOpt1;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    answerText = t("tg_saved");
-                    const menu = getMainMenu(getActivePanel(), isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb, messageId);
-                } else if (data === "tg_toggle_ech") {
-                    sysConfig.enableOpt2 = !sysConfig.enableOpt2;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    answerText = t("tg_saved");
-                    const menu = getMainMenu(getActivePanel(), isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb, messageId);
-                } else if (data === "tg_toggle_silent") {
-                    sysConfig.silentAlerts = !sysConfig.silentAlerts;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    answerText = t("tg_saved");
-                    const menu = getMainMenu(getActivePanel(), isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb, messageId);
-                } else if (data === "tg_toggle_pause2") {
-                    sysConfig.isPaused = !sysConfig.isPaused;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    answerText = t("tg_saved");
-                    const menu = getMainMenu(getActivePanel(), isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb, messageId);
-                } else if (data === "tg_toggle_auto_update") {
-                    sysConfig.autoUpdate = !sysConfig.autoUpdate;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    answerText = t("tg_saved");
-                    await sendOrEdit(
-                        chatId,
-                        `⚙️ ${t("tg_auto_update")}: ${sysConfig.autoUpdate ? "✅ ON" : "❌ OFF"}`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "◀️ " + t("btn_back"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_toggle_direct") {
-                    sysConfig.enableDirectConfigs =
-                        !sysConfig.enableDirectConfigs;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    answerText = t("tg_saved");
-                    await sendOrEdit(
-                        chatId,
-                        `🔀 ${t("tg_direct")}: ${sysConfig.enableDirectConfigs ? "✅ ON" : "❌ OFF"}`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "◀️ " + t("btn_back"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_proto") {
-                    tgState[chatId] = { step: "tg_edit_proto" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: "Alpha (V-Core)",
-                                    callback_data: "tg_set_proto:alpha",
-                                },
-                                {
-                                    text: "Beta (T-Core)",
-                                    callback_data: "tg_set_proto:beta",
-                                },
-                            ],
-                            [
-                                {
-                                    text: "Both",
-                                    callback_data: "tg_set_proto:both",
-                                },
-                            ],
-                            [
-                                {
-                                    text: "❌ " + t("btn_cancel"),
-                                    callback_data: "tg_settings_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(
-                        chatId,
-                        `📡 **${t("tg_proto")}**\n${t("tg_current_val")}: **${sysConfig.mode}**\n\n${t("tg_new_val")}`,
-                        kb,
-                        messageId,
-                    );
-                } else if (data.startsWith("tg_set_proto:")) {
-                    const val = data.replace("tg_set_proto:", "");
-                    sysConfig.mode = val;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    tgState[chatId] = null;
-                    answerText = t("tg_saved");
-                    await sendOrEdit(
-                        chatId,
-                        `✅ ${t("tg_proto")}: **${val}**`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "◀️ " + t("btn_back"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_dns") {
-                    tgState[chatId] = { step: "tg_edit_dns" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🌐 **${t("tg_dns")}**\n${t("tg_current_val")}: \`${sysConfig.resolveIp}\`\n\n${t("tg_new_val")}`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_relay") {
-                    tgState[chatId] = { step: "tg_edit_relay" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🔗 **${t("tg_relay")}**\n${t("tg_current_val")}: \`${sysConfig.backupRelay || "—"}\`\n\n${t("tg_new_val")}\n_send empty to clear_`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_nat64") {
-                    tgState[chatId] = { step: "tg_edit_nat64" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🌐 **${t("tg_nat64")}**\n${t("tg_current_val")}: \`${sysConfig.nat64Prefix || "—"}\`\n\n${t("tg_new_val")}\n_send empty to clear_`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_maintenance") {
-                    tgState[chatId] = { step: "tg_edit_maintenance" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🎭 **${t("tg_maintenance")}**\n${t("tg_current_val")}: \`${sysConfig.maintenanceHost || "—"}\`\n\n${t("tg_new_val")}`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_clean_ips") {
-                    tgState[chatId] = { step: "tg_edit_clean_ips" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🧹 **${t("tg_clean_ips")}**\n${t("tg_current_val")}: \`${sysConfig.cleanIps || "—"}\`\n\n${t("tg_new_val")}\n_send empty to clear_`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_advanced_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_nodes") {
-                    let lpList = (sysConfig.linkedPanels || [])
-                        .map((p, i) => `${i + 1}. \`${p.url}\``)
-                        .join("\n");
-                    if (!lpList) lpList = "—";
-                    const warningMsg = langCode === "fa"
-                        ? `🖥️ **${t("tg_nodes")}**\n\n${lpList}\n\n⚠️ لطفاً برای افزودن، حذف یا ویرایش نودهای خارجی به صورت امن همراه با کلید دسترسی (API Key)، از داشبورد تحت وب استفاده کنید.`
-                        : `🖥️ **${t("tg_nodes")}**\n\n${lpList}\n\n⚠️ Please use the Web Dashboard to add, remove, or edit external nodes securely with API Keys.`;
-                    await sendOrEdit(
-                        chatId,
-                        warningMsg,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "◀️ " + t("btn_back"),
-                                        callback_data: "tg_advanced_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_strategy") {
-                    tgState[chatId] = { step: "tg_edit_strategy" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const kb = {
-                        inline_keyboard: [
-                            [
-                                {
-                                    text: "default",
-                                    callback_data: "tg_set_strategy:default",
-                                },
-                            ],
-                            [
-                                {
-                                    text: "type-user-port",
-                                    callback_data:
-                                        "tg_set_strategy:type-user-port",
-                                },
-                            ],
-                            [
-                                {
-                                    text: "user-port",
-                                    callback_data: "tg_set_strategy:user-port",
-                                },
-                            ],
-                            [
-                                {
-                                    text: "ip",
-                                    callback_data: "tg_set_strategy:ip",
-                                },
-                            ],
-                            [
-                                {
-                                    text: "❌ " + t("btn_cancel"),
-                                    callback_data: "tg_advanced_menu",
-                                },
-                            ],
-                        ],
-                    };
-                    await sendOrEdit(
-                        chatId,
-                        `📝 **${t("tg_strategy")}**\n${t("tg_current_val")}: \`${sysConfig.nameStrategy}\`\n\n_send custom or select:_`,
-                        kb,
-                        messageId,
-                    );
-                } else if (data.startsWith("tg_set_strategy:")) {
-                    const val = data.replace("tg_set_strategy:", "");
-                    sysConfig.nameStrategy = val;
-                    await cachedD1Put(
-                        env,
-                        "sys_config",
-                        JSON.stringify(sysConfig),
-                    );
-                    tgState[chatId] = null;
-                    answerText = t("tg_saved");
-                    await sendOrEdit(
-                        chatId,
-                        `✅ ${t("tg_strategy")}: **${val}**`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "◀️ " + t("btn_back"),
-                                        callback_data: "tg_advanced_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_prefix") {
-                    tgState[chatId] = { step: "tg_edit_prefix" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🏷️ **${t("tg_prefix")}**\n${t("tg_current_val")}: \`${sysConfig.namePrefix}\`\n\n${t("tg_new_val")}`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_advanced_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_pass") {
-                    tgState[chatId] = { step: "tg_edit_pass" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🔑 **${t("tg_pass")}**\n${t("tg_current_val")}: \`${sysConfig.masterKey}\`\n\n${t("tg_new_val")}`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_ports") {
-                    tgState[chatId] = { step: "tg_edit_ports" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🔌 **${t("tg_ports")}**\n${t("tg_current_val")}: \`${sysConfig.socketPorts}\`\n\n${t("tg_new_val")}\n_comma separated e.g. 443,80_`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_settings_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_tg_settings") {
-                    tgState[chatId] = { step: "tg_edit_tg_token" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `🤖 **${t("tg_tg_settings")}**\n\n1️⃣ ${t("tg_current_val")}: \`${sysConfig.tgToken ? "***" + sysConfig.tgToken.slice(-4) : "—"}\`\n\n${t("tg_new_val")}\n_send /skip to keep current_`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_advanced_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                } else if (data === "tg_edit_cf_settings") {
-                    tgState[chatId] = { step: "tg_edit_cf_acc" };
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    await sendOrEdit(
-                        chatId,
-                        `☁️ **${t("tg_cf_settings")}**\n\n1️⃣ CF Account ID: \`${sysConfig.cfAccountId || "—"}\`\n\n${t("tg_new_val")}\n_send /skip to keep current_`,
-                        {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: "❌ " + t("btn_cancel"),
-                                        callback_data: "tg_advanced_menu",
-                                    },
-                                ],
-                            ],
-                        },
-                        messageId,
-                    );
-                }
-
-                ctx?.waitUntil(
-                    fetchT(`${tgApi}/answerCallbackQuery`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            callback_query_id: cb.id,
-                            text: answerText || "Done!",
-                        }),
-                    }).catch(() => {}),
-                );
-            }
-        } else if (update.message && update.message.text) {
-            const chatId = update.message.chat.id;
-            const text = update.message.text.trim();
-
-            if (isAuthorized) {
-                // Get active panel from last login signal
-                const activePanel = getActivePanel();
-                const isRemotePanel = activePanel && !activePanel.isLocal;
-
-                // Helper to fetch users for the active panel
-                const getPanelUsers = async () => {
-                    if (isRemotePanel) {
-                        const res = await fetchRemotePanelUsers(activePanel);
-                        return res.success ? res.users || [] : null;
-                    }
-                    return sysConfig.users || [];
-                };
-
-                // Handle /start command
-                if (text === "/start") {
-                    tgState[chatId] = null;
-                    ctx?.waitUntil(
-                        d1Put(
-                            env,
-                            "tg_bot_state",
-                            JSON.stringify(tgState),
-                        ).catch(() => {}),
-                    );
-                    const menu = getMainMenu(activePanel, isAuthorized);
-                    await sendOrEdit(chatId, menu.text, menu.kb);
-                    return new Response("OK", { status: 200 });
-                }
-
-                const state = tgState[chatId];
-
-                if (state) {
-                    if (!isAuthorized) {
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(chatId, t("access_denied"));
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step === "sub_add_name") {
-                        const name = text;
-                        tgState[chatId] = {
-                            step: "sub_add_limits",
-                            name: name,
-                        };
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-
-                        const msg = `⚙️ **${name}**\n\n${t("msg_enter_limits")}`;
-                        const kb = {
-                            inline_keyboard: [
-                                [
-                                    {
-                                        text: `♾️ Skip (Unlimited)`,
-                                        callback_data: "sub_add_unlimited_skip",
-                                    },
-                                ],
-                                [
-                                    {
-                                        text: `❌ ${t("btn_cancel")}`,
-                                        callback_data: "main_menu",
-                                    },
-                                ],
-                            ],
-                        };
-                        await sendOrEdit(chatId, msg, kb);
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (
-                        state.step === "sub_add_limits" ||
-                        state.step === "sub_add_unlimited_skip"
-                    ) {
-                        const name = state.name;
-                        let tReq = null;
-                        let dReq = null;
-                        let days = null;
-
-                        if (
-                            state.step !== "sub_add_unlimited_skip" &&
-                            text !== "0" &&
-                            text !== "0 0 0"
-                        ) {
-                            const parts = text.split(/\s+/).map(Number);
-                            if (parts[0] > 0) tReq = parts[0];
-                            if (parts[1] > 0) dReq = parts[1];
-                            if (parts[2] > 0) days = parts[2];
-                        }
-
-                        const newUuid = crypto.randomUUID();
-                        if (isRemotePanel) {
-                            const res = await remotePanelWriteAction(
-                                activePanel,
-                                "POST",
-                                null,
-                                {
-                                    key: activePanel.apiKey,
-                                    name: name,
-                                    trafficLimit: tReq ? tReq / 6000 : 0,
-                                    dailyLimit: dReq ? dReq / 6000 : 0,
-                                    expiryDays: days || 0,
-                                },
-                            );
-                            if (res.success && res.user) {
-                                const detail = getSubDetail(res.user.id, [
-                                    res.user,
-                                ]);
-                                await sendOrEdit(
-                                    chatId,
-                                    `✅ ${t("msg_added")}\n\n${detail.text}`,
-                                    detail.kb,
-                                );
-                            } else {
-                                await sendOrEdit(chatId, t("msg_panel_error"), {
-                                    inline_keyboard: [
-                                        [
-                                            {
-                                                text: t("btn_main_menu"),
-                                                callback_data: "main_menu",
-                                            },
-                                        ],
-                                    ],
-                                });
-                            }
-                        } else {
-                            if (!sysConfig.users) sysConfig.users = [];
-                            sysConfig.users.push({
-                                id: newUuid,
-                                name: name,
-                                limitTotalReq: tReq,
-                                limitDailyReq: dReq,
-                                expiryMs: days
-                                    ? Date.now() + days * 86400000
-                                    : null,
-                                createdAt: Date.now(),
-                            });
-                            await cachedD1Put(
-                                env,
-                                "sys_config",
-                                JSON.stringify(sysConfig),
-                            );
-                            const detail = getSubDetail(newUuid);
-                            await sendOrEdit(
-                                chatId,
-                                `✅ ${t("msg_added")}\n\n${detail.text}`,
-                                detail.kb,
-                            );
-                        }
-
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step.startsWith("sub_edit_name:")) {
-                        const uuid = state.step.replace("sub_edit_name:", "");
-                        if (isRemotePanel) {
-                            await remotePanelWriteAction(
-                                activePanel,
-                                "PUT",
-                                uuid,
-                                { key: activePanel.apiKey, name: text },
-                            );
-                        } else if (sysConfig.users) {
-                            const u = sysConfig.users.find(
-                                (usr) => usr.id === uuid,
-                            );
-                            if (u) {
-                                u.name = text;
-                                await cachedD1Put(
-                                    env,
-                                    "sys_config",
-                                    JSON.stringify(sysConfig),
-                                );
-                            }
-                        }
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-
-                        const panelUsers = await getPanelUsers();
-                        const detail = getSubDetail(uuid, panelUsers);
-                        await sendOrEdit(
-                            chatId,
-                            `✅ Successfully Changed!`,
-                            detail.kb,
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step.startsWith("sub_edit_limits:")) {
-                        const uuid = state.step.replace("sub_edit_limits:", "");
-                        let tReq = null;
-                        let dReq = null;
-                        let days = null;
-
-                        const parts = text.split(/\s+/).map(Number);
-                        if (parts[0] > 0) tReq = parts[0];
-                        if (parts[1] > 0) dReq = parts[1];
-                        if (parts[2] > 0) days = parts[2];
-
-                        if (isRemotePanel) {
-                            await remotePanelWriteAction(
-                                activePanel,
-                                "PUT",
-                                uuid,
-                                {
-                                    key: activePanel.apiKey,
-                                    trafficLimit: tReq ? tReq / 6000 : 0,
-                                    dailyLimit: dReq ? dReq / 6000 : 0,
-                                    expiryDays: days || 0,
-                                },
-                            );
-                        } else if (sysConfig.users) {
-                            const u = sysConfig.users.find(
-                                (usr) => usr.id === uuid,
-                            );
-                            if (u) {
-                                u.limitTotalReq = tReq;
-                                u.limitDailyReq = dReq;
-                                u.expiryMs = days
-                                    ? Date.now() + days * 86400000
-                                    : null;
-                                await cachedD1Put(
-                                    env,
-                                    "sys_config",
-                                    JSON.stringify(sysConfig),
-                                );
-                            }
-                        }
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-
-                        const panelUsers = await getPanelUsers();
-                        const detail = getSubDetail(uuid, panelUsers);
-                        await sendOrEdit(
-                            chatId,
-                            `✅ Limits Updated!`,
-                            detail.kb,
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step === "sub_search") {
-                        const query = text.toLowerCase();
-                        const panelUsers = await getPanelUsers();
-                        const users = panelUsers || [];
-                        const results = users.filter(
-                            (u) =>
-                                u.name.toLowerCase().includes(query) ||
-                                u.id.toLowerCase().includes(query),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        if (results.length === 0) {
-                            const kb = {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: t("btn_main_menu"),
-                                            callback_data: "main_menu",
-                                        },
-                                    ],
-                                ],
-                            };
-                            await sendOrEdit(
-                                chatId,
-                                `🔍 No users found for "${text}"`,
-                                kb,
-                            );
-                        } else {
-                            let searchText = `🔍 **Search Results** (${results.length})\n━━━━━━━━━━━━━━━━\n`;
-                            const inline_keyboard = [];
-                            results.slice(0, 10).forEach((u) => {
-                                const statusEmoji = u.isPaused
-                                    ? "⏸️"
-                                    : u.expiryMs && Date.now() > u.expiryMs
-                                      ? "🔴"
-                                      : "🟢";
-                                searchText += `${statusEmoji} **${u.name}**\n`;
-                                inline_keyboard.push([
-                                    {
-                                        text: `👤 ${u.name}`,
-                                        callback_data: `sub_detail:${u.id}`,
-                                    },
-                                ]);
-                            });
-                            inline_keyboard.push([
-                                {
-                                    text: t("btn_main_menu"),
-                                    callback_data: "main_menu",
-                                },
-                            ]);
-                            await sendOrEdit(chatId, searchText, {
-                                inline_keyboard,
-                            });
-                        }
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step.startsWith("sub_extend_days:")) {
-                        const uuid = state.step.replace("sub_extend_days:", "");
-                        const days = parseInt(text);
-                        if (isNaN(days) || days <= 0) {
-                            await sendOrEdit(chatId, t("msg_invalid"));
-                            return new Response("OK", { status: 200 });
-                        }
-                        if (isRemotePanel) {
-                            await remotePanelWriteAction(
-                                activePanel,
-                                "PUT",
-                                uuid,
-                                { key: activePanel.apiKey, expiryDays: days },
-                            );
-                        } else if (sysConfig.users) {
-                            const u = sysConfig.users.find(
-                                (usr) => usr.id === uuid,
-                            );
-                            if (u) {
-                                if (u.expiryMs) {
-                                    u.expiryMs += days * 86400000;
-                                } else {
-                                    u.expiryMs = Date.now() + days * 86400000;
-                                }
-                                if (
-                                    u.isPaused &&
-                                    u.disabledReason &&
-                                    u.disabledReason.includes("Expiration")
-                                ) {
-                                    u.isPaused = false;
-                                    u.disabledReason = null;
-                                    u.disabledAt = null;
-                                }
-                                await cachedD1Put(
-                                    env,
-                                    "sys_config",
-                                    JSON.stringify(sysConfig),
-                                );
-                            }
-                        }
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        const panelUsers = await getPanelUsers();
-                        const detail = getSubDetail(uuid, panelUsers);
-                        const msg = t("msg_expiry_extended").replace(
-                            "{days}",
-                            days,
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${msg}\n\n${detail.text}`,
-                            detail.kb,
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step.startsWith("sub_edit_notes:")) {
-                        const uuid = state.step.replace("sub_edit_notes:", "");
-                        if (isRemotePanel) {
-                            await remotePanelWriteAction(
-                                activePanel,
-                                "PUT",
-                                uuid,
-                                { key: activePanel.apiKey, notes: text },
-                            );
-                        } else if (sysConfig.users) {
-                            const u = sysConfig.users.find(
-                                (usr) => usr.id === uuid,
-                            );
-                            if (u) {
-                                u.notes = text;
-                                await cachedD1Put(
-                                    env,
-                                    "sys_config",
-                                    JSON.stringify(sysConfig),
-                                );
-                            }
-                        }
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        const panelUsers = await getPanelUsers();
-                        const detail = getSubDetail(uuid, panelUsers);
-                        await sendOrEdit(
-                            chatId,
-                            `✅ Notes updated!`,
-                            detail.kb,
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step.startsWith("sub_edit_device:")) {
-                        const uuid = state.step.replace("sub_edit_device:", "");
-                        const limit = parseInt(text);
-                        if (isNaN(limit) || limit < 0) {
-                            await sendOrEdit(chatId, t("msg_invalid"));
-                            return new Response("OK", { status: 200 });
-                        }
-                        if (isRemotePanel) {
-                            await remotePanelWriteAction(
-                                activePanel,
-                                "PUT",
-                                uuid,
-                                {
-                                    key: activePanel.apiKey,
-                                    maxConfigs: limit > 0 ? limit : null,
-                                },
-                            );
-                        } else if (sysConfig.users) {
-                            const u = sysConfig.users.find(
-                                (usr) => usr.id === uuid,
-                            );
-                            if (u) {
-                                u.maxConfigs = limit > 0 ? limit : null;
-                                await cachedD1Put(
-                                    env,
-                                    "sys_config",
-                                    JSON.stringify(sysConfig),
-                                );
-                            }
-                        }
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        const panelUsers = await getPanelUsers();
-                        const detail = getSubDetail(uuid, panelUsers);
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("config_limit_updated")}`,
-                            detail.kb,
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-
-                    if (state.step === "tg_edit_dns") {
-                        sysConfig.resolveIp = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_dns")}: \`${text}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_settings_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_relay") {
-                        sysConfig.backupRelay = text || "";
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_relay")}: \`${text || "—"}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_settings_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_nat64") {
-                        sysConfig.nat64Prefix = text || "";
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_nat64")}: \`${text || "—"}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_settings_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_maintenance") {
-                        sysConfig.maintenanceHost = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_maintenance")}: \`${text}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_clean_ips") {
-                        sysConfig.cleanIps = text || "";
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_clean_ips")}: \`${text || "—"}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_prefix") {
-                        sysConfig.namePrefix = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_prefix")}: \`${text}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_pass") {
-                        sysConfig.masterKey = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_pass")}: \`${text}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_settings_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_strategy") {
-                        sysConfig.nameStrategy = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_strategy")}: \`${text}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_tg_token") {
-                        if (text !== "/skip") sysConfig.tgToken = text;
-                        tgState[chatId] = { step: "tg_edit_tg_chat" };
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `2️⃣ Chat ID: \`${sysConfig.tgChatId || "—"}\`\n\n${t("tg_new_val")}\n_send /skip to keep current_`,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "❌ " + t("btn_cancel"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_tg_chat") {
-                        if (text !== "/skip") sysConfig.tgChatId = text;
-                        tgState[chatId] = { step: "tg_edit_tg_admin" };
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `3️⃣ Admin ID: \`${sysConfig.tgAdminId || "—"}\`\n\n${t("tg_new_val")}\n_send /skip to keep current_`,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "❌ " + t("btn_cancel"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_tg_admin") {
-                        if (text !== "/skip") sysConfig.tgAdminId = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_tg_settings")} saved!`,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_cf_acc") {
-                        if (text !== "/skip") sysConfig.cfAccountId = text;
-                        tgState[chatId] = { step: "tg_edit_cf_token" };
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `2️⃣ CF API Token: \`${sysConfig.cfApiToken ? "***" + sysConfig.cfApiToken.slice(-4) : "—"}\`\n\n${t("tg_new_val")}\n_send /skip to keep current_`,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "❌ " + t("btn_cancel"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_cf_token") {
-                        if (text !== "/skip") sysConfig.cfApiToken = text;
-                        tgState[chatId] = { step: "tg_edit_cf_worker" };
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `3️⃣ CF Worker Name: \`${sysConfig.cfWorkerName || "—"}\`\n\n${t("tg_new_val")}\n_send /skip to keep current_`,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "❌ " + t("btn_cancel"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_cf_worker") {
-                        if (text !== "/skip") sysConfig.cfWorkerName = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_cf_settings")} saved!`,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_advanced_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                    if (state.step === "tg_edit_ports") {
-                        sysConfig.socketPorts = text;
-                        await cachedD1Put(
-                            env,
-                            "sys_config",
-                            JSON.stringify(sysConfig),
-                        );
-                        tgState[chatId] = null;
-                        ctx?.waitUntil(
-                            d1Put(
-                                env,
-                                "tg_bot_state",
-                                JSON.stringify(tgState),
-                            ).catch(() => {}),
-                        );
-                        await sendOrEdit(
-                            chatId,
-                            `✅ ${t("tg_ports")}: \`${text}\``,
-                            {
-                                inline_keyboard: [
-                                    [
-                                        {
-                                            text: "◀️ " + t("btn_back"),
-                                            callback_data: "tg_settings_menu",
-                                        },
-                                    ],
-                                ],
-                            },
-                        );
-                        return new Response("OK", { status: 200 });
-                    }
-                }
-
-                // Default message / fallback menu
-                const menu = getMainMenu(activePanel, isAuthorized);
-                await sendOrEdit(chatId, menu.text, menu.kb);
-            } else {
-                if (text === "/start") {
-                    const userHint =
-                        langCode === "fa"
-                            ? "لطفاً لینک اشتراک یا شناسه کاربری خود را ارسال کنید تا اطلاعات اشتراکتان نمایش داده شود."
-                            : "Please send your subscription link or User ID to view your subscription info.";
-                    await sendOrEdit(chatId, userHint);
-                    return new Response("OK", { status: 200 });
-                }
-                let lookupId = text
-                    .replace(/^https?:\/\//, "")
-                    .replace(/\/.*$/, "")
-                    .trim();
-                const subParamMatch = text.match(/[?&]sub=([^&]+)/);
-                if (subParamMatch)
-                    lookupId = decodeURIComponent(subParamMatch[1]);
-                if (!lookupId || lookupId.length < 3) {
-                    const userHint =
-                        langCode === "fa"
-                            ? "لطفاً لینک اشتراک یا شناسه کاربری معتبر ارسال کنید."
-                            : "Please send a valid subscription link or User ID.";
-                    await sendOrEdit(chatId, userHint);
-                    return new Response("OK", { status: 200 });
-                }
-                const users = sysConfig.users || [];
-                const matchedUser = users.find(
-                    (u) =>
-                        u.id === lookupId ||
-                        u.id.replace(/-/g, "").toLowerCase() ===
-                            lookupId.replace(/-/g, "").toLowerCase() ||
-                        u.name.toLowerCase() === lookupId.toLowerCase(),
-                );
-                if (matchedUser) {
-                    const detail = getSubDetail(matchedUser.id);
-                    await sendOrEdit(chatId, detail.text, detail.kb);
-                } else {
-                    const notFound =
-                        langCode === "fa"
-                            ? "کاربری با این شناسه یافت نشد."
-                            : "No user found with this ID.";
-                    await sendOrEdit(chatId, notFound);
-                }
-            }
-        }
-        return new Response("OK", { status: 200 });
-    } catch (e) {
-        return new Response("OK", { status: 200 });
+    // 获取当前语言设置（优先从Cookie/localStorage读取）
+    function 获取凭据20178(名称20177) {
+      const 值20176 = '; ' + document.cookie;
+      const 部分列表20175 = 值20176.split('; ' + 名称20177 + '=');
+      if (部分列表20175.length === 2) return 部分列表20175.pop().split(';').shift();
+      return null;
     }
-}
-
-// ==== Self-healing relays (Sepidar-grade, adapted to nahan's model) ====
-// Nahan relays are plain tokens (IP[:port][#Name]) in per-user proxyIp +
-// global backupRelay/customRelay. A dead relay hangs WS handshakes and can
-// pile up isolates -> Cloudflare loadShed -> 1101 for everyone.
-// Layers: passive fail-streak quarantine (5 fails -> 15min skip) + active
-// TLS-probe rounds (10min, 6 relays, two-stage verdict 4s->7s, floating cap
-// under breaker pressure, round-robin rotation) + graveyard burial with slow
-// re-probe (30min, rotation) and auto-resurrect after 3 healthy probes +
-// per-SNI AI quarantine (AI-only failures never kill general traffic).
-// Kill switch: sysConfig.autoPruneRelays === false/0 freezes burial+probing.
-const RELAY_Q = new Map(); // key "host|port" -> { fail, until, probeFail }
-const RELAY_QUARANTINE_MS = 15 * 60 * 1000;
-const RELAY_FAIL_STREAK = 5;
-// Ports where a TLS handshake is expected; other relay ports are liveness
-// checked by TCP open only (a TLS probe there would false-positive).
-const RELAY_TLS_PORTS = new Set([
-    "443",
-    "2053",
-    "2083",
-    "2087",
-    "2096",
-    "8443",
-]);
-const PROBE_INTERVAL_MS = 10 * 60 * 1000;
-const PROBE_MAX_PER_ROUND = 6;
-const PROBE_FAIL_LIMIT = 3;
-const GRAVE_INTERVAL_MS = 30 * 60 * 1000;
-const GRAVE_MAX_PER_ROUND = 3;
-const GRAVE_HEALTHY_NEED = 3;
-const FLAP_WINDOW_MS = 24 * 60 * 60 * 1000;
-const FLAP_LIMIT = 3;
-let lastRelaySweep = 0;
-let lastProbeTs = 0;
-let lastGraveTs = 0;
-let lastHealthSave = 0;
-// Round-robin cursors (module-level so they persist across rounds).
-let probeCursor = 0;
-let graveCursor = 0;
-// Persistent cross-isolate runner locks (Sepidar-grade, adapted to nahan's
-// kv_store model). Worker isolates are independent processes: in-memory
-// lastProbeTs/cursors reset on every cold start, so separate isolates each
-// believed maintenance was due and starved later relays. The lease lives in
-// D1 with an expiry so a crashed isolate cannot hold it forever. Release
-// and refresh compare the exact lease value so an old owner can never
-// delete/overwrite a new owner's lease.
-async function acquireNahanRunnerLock(
-    env,
-    jobKey,
-    intervalMs,
-    lockGroup = "nahan-relay",
-) {
-    const physicalKey = "nahan_lock:" + String(lockGroup || "nahan-relay");
-    const scheduleKey = "nahan_runner_last_" + String(jobKey || "job");
-    let lease = null;
-    try {
-        if (!env || !env.IOT_DB) return null;
-        const now = Date.now();
-        const until = now + NAHAN_RUNNER_LEASE_TTL_MS;
-        try {
-            const r = await env.IOT_DB.prepare(
-                "UPDATE kv_store SET value=? WHERE key=? AND CAST(value AS INTEGER)<?",
-            )
-                .bind(String(until), physicalKey, now)
-                .run();
-            if (r && r.meta && r.meta.changes > 0)
-                lease = { lockKey: physicalKey, until, scheduleKey };
-        } catch (e) {}
-        if (!lease) {
-            try {
-                const r = await env.IOT_DB.prepare(
-                    "INSERT OR IGNORE INTO kv_store(key,value) VALUES(?,?)",
-                )
-                    .bind(physicalKey, String(until))
-                    .run();
-                if (r && r.meta && r.meta.changes > 0)
-                    lease = { lockKey: physicalKey, until, scheduleKey };
-            } catch (e) {}
-        }
-        if (!lease) return null;
-        let lastRun = 0;
-        try {
-            const row = await env.IOT_DB.prepare(
-                "SELECT value FROM kv_store WHERE key=?",
-            )
-                .bind(scheduleKey)
-                .first();
-            lastRun = Number((row && row.value) || 0) || 0;
-        } catch (e) {}
-        if (intervalMs > 0 && now - lastRun < intervalMs) {
-            await releaseNahanRunnerLock(env, lease);
-            return null;
-        }
-        try {
-            await env.IOT_DB.prepare(
-                "INSERT INTO kv_store(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            )
-                .bind(scheduleKey, String(now))
-                .run();
-        } catch (e) {
-            await releaseNahanRunnerLock(env, lease);
-            return null;
-        }
-        return lease;
-    } catch (e) {
-        try {
-            if (lease) await releaseNahanRunnerLock(env, lease);
-        } catch (_) {}
-        return null;
+    const 浏览器语言20174 = navigator.language || navigator.userLanguage || '';
+    const 已保存语言20173 = localStorage.getItem('preferredLanguage') || 获取凭据20178('preferredLanguage');
+    let 是否值20172 = false;
+    if (已保存语言20173 === 'fa' || 已保存语言20173 === 'fa-IR') {
+      是否值20172 = true;
+    } else if (已保存语言20173 === 'zh' || 已保存语言20173 === 'zh-CN') {
+      是否值20172 = false;
+    } else {
+      是否值20172 = 浏览器语言20174.includes('fa') || 浏览器语言20174.includes('fa-IR');
     }
-}
-async function refreshNahanRunnerLease(env, lease) {
-    try {
-        if (!lease || !env || !env.IOT_DB) return false;
-        const nextUntil = Date.now() + NAHAN_RUNNER_LEASE_TTL_MS;
-        const r = await env.IOT_DB.prepare(
-            "UPDATE kv_store SET value=? WHERE key=? AND value=?",
-        )
-            .bind(String(nextUntil), lease.lockKey, String(lease.until))
-            .run();
-        if (r && r.meta && r.meta.changes > 0) {
-            lease.until = nextUntil;
-            return true;
-        }
-    } catch (e) {}
-    return false;
-}
-async function releaseNahanRunnerLock(env, lease) {
-    try {
-        if (lease && env && env.IOT_DB) {
-            await env.IOT_DB.prepare(
-                "DELETE FROM kv_store WHERE key=? AND value=?",
-            )
-                .bind(lease.lockKey, String(lease.until))
-                .run();
-        }
-    } catch (e) {}
-}
-function relayKeyOf(tok) {
-    try {
-        let s = String(tok || "").trim();
-        if (!s) return null;
-        s = s.replace(/^[a-zA-Z]+:\/\//, "");
-        if (s.includes("@")) s = s.substring(s.lastIndexOf("@") + 1);
-        const hi = s.indexOf("#");
-        if (hi !== -1) s = s.substring(0, hi).trim();
-        if (!s) return null;
-        if (s.charAt(0) === "[") {
-            const ci = s.indexOf("]");
-            if (ci === -1) return null;
-            const host = s.substring(1, ci).toLowerCase();
-            let port = 443;
-            if (s.length > ci + 1 && s.charAt(ci + 1) === ":") {
-                const p = parseInt(s.substring(ci + 2), 10);
-                if (!isNaN(p) && p >= 1 && p <= 65535) port = p;
-            }
-            if (!host) return null;
-            return { host, port, key: host + "|" + port };
-        }
-        const firstColon = s.indexOf(":");
-        const lastColon = s.lastIndexOf(":");
-        if (firstColon !== -1 && firstColon !== lastColon) {
-            const host = s.toLowerCase();
-            if (!host || host.length > 253) return null;
-            return { host, port: 443, key: host + "|443" };
-        }
-        let host = s;
-        let port = 443;
-        if (lastColon !== -1) {
-            const tail = s.substring(lastColon + 1).trim();
-            if (/^\d+$/.test(tail)) {
-                const p = parseInt(tail, 10);
-                if (!isNaN(p) && p >= 1 && p <= 65535) {
-                    host = s.substring(0, lastColon);
-                    port = p;
-                } else {
-                    return null;
-                }
-            } else {
-                return null;
-            }
-        }
-        host = host.toLowerCase();
-        if (!host || host.length > 253) return null;
-        if (!/^[a-z0-9.\-]+$/.test(host)) return null;
-        return { host, port, key: host + "|" + port };
-    } catch (e) {
-        return null;
-    }
-}
-function isRelayQuarantined(host, port) {
-    try {
-        const e = RELAY_Q.get(
-            String(host || "").toLowerCase() + "|" + (port || 443),
-        );
-        if (!e || !e.until) return false;
-        if (Date.now() > e.until) {
-            RELAY_Q.delete(
-                String(host || "").toLowerCase() + "|" + (port || 443),
-            );
-            return false;
-        }
-        return true;
-    } catch (err) {
-        return false;
-    }
-}
-function recordRelaySuccess(host, port, full) {
-    try {
-        const k =
-            String(host || "").toLowerCase() + "|" + (port || 443);
-        const e = RELAY_Q.get(k);
-        if (!e) return;
-        e.fail = 0;
-        if (full) {
-            e.probeFail = 0;
-            e.until = 0;
-            if (!e.fail && !e.probeFail) RELAY_Q.delete(k);
-        }
-    } catch (err) {}
-}
-function recordRelayFailure(host, port) {
-    try {
-        const k =
-            String(host || "").toLowerCase() + "|" + (port || 443);
-        let e = RELAY_Q.get(k);
-        if (!e) {
-            e = { fail: 0, until: 0, probeFail: 0 };
-            RELAY_Q.set(k, e);
-        }
-        e.fail = (e.fail || 0) + 1;
-        if (e.fail >= RELAY_FAIL_STREAK) {
-            const alreadyOut =
-                e.until && e.until > Date.now() ? true : false;
-            e.until = Date.now() + RELAY_QUARANTINE_MS;
-            // Log only the transition into quarantine, not every failure
-            // afterwards (a dead relay under a reconnect storm would
-            // otherwise spam the log on every single connection).
-            if (!alreadyOut) {
-                try {
-                    console.error(
-                        "relay-quarantined: " + k + " (" + e.fail + " fails)",
-                    );
-                } catch (err) {}
-            }
-        }
-        if (RELAY_Q.size > 2000) RELAY_Q.clear();
-    } catch (err) {}
-}
-// ==== Per-SNI AI quarantine (same as Sepidar agency-wide): a relay that
-// fails only for a specific SNI (e.g. Google) must not die for all traffic.
-// Memory-only (zero D1 writes): 3 AI-traffic fails in a row = 30min quarantine
-// for AI traffic only. Expiry = automatic re-test; AI success clears it.
-// The chain never ends up empty (fallback keeps the original list).
-const AI_RELAY_Q = new Map();
-const AI_FAIL_STREAK = 3;
-const AI_QUARANTINE_MS = 30 * 60 * 1000;
-function isAiQuarantined(host, port) {
-    try {
-        const k =
-            String(host || "").toLowerCase() + "|" + (port || 443);
-        const e = AI_RELAY_Q.get(k);
-        if (!e) return false;
-        if (e.until) {
-            if (Date.now() < e.until) return true;
-            try {
-                AI_RELAY_Q.delete(k);
-            } catch (err) {}
-            return false;
-        }
-        // Still counting fails (until=0): never delete here or the streak
-        // could never reach the limit (checked on every AI connection).
-        return false;
-    } catch (err) {
-        return false;
-    }
-}
-function recordAiFailure(host, port) {
-    try {
-        if (AI_RELAY_Q.size > 500) {
-            const now0 = Date.now();
-            for (const [kk, vv] of AI_RELAY_Q) {
-                if (!vv || !vv.until || vv.until <= now0) {
-                    try {
-                        AI_RELAY_Q.delete(kk);
-                    } catch (e) {}
-                }
-                if (AI_RELAY_Q.size <= 400) break;
-            }
-        }
-        const k =
-            String(host || "").toLowerCase() + "|" + (port || 443);
-        const now = Date.now();
-        const e = AI_RELAY_Q.get(k) || { fail: 0, until: 0 };
-        if (e.until && now < e.until) return;
-        e.fail++;
-        if (e.fail >= AI_FAIL_STREAK) {
-            e.until = now + AI_QUARANTINE_MS;
-            e.fail = 0;
-            try {
-                console.error("relay-ai-quarantined: " + k);
-            } catch (err) {}
-        }
-        AI_RELAY_Q.set(k, e);
-    } catch (err) {}
-}
-function recordAiSuccess(host, port) {
-    try {
-        AI_RELAY_Q.delete(
-            String(host || "").toLowerCase() + "|" + (port || 443),
-        );
-    } catch (err) {}
-}
-// Token-string variant: Nahan chains carry "IP[:port][#Name]" strings.
-function filterAiQuarantinedTokens(list) {
-    // Fail-closed: a known-bad relay must not be reintroduced merely
-    // because the healthy set is empty. Empty means explicit failure.
-    try {
-        return (list || []).filter((t) => {
-            const rk = relayKeyOf(t);
-            if (!rk) return true;
-            return !isAiQuarantined(rk.host, rk.port);
-        });
-    } catch (e) {
-        return [];
-    }
-}
-function filterQuarantinedRelays(list) {
-    // Fail-closed: see above.
-    try {
-        return (list || []).filter((t) => {
-            const rk = relayKeyOf(t);
-            if (!rk) return true;
-            return !isRelayQuarantined(rk.host, rk.port);
-        });
-    } catch (e) {
-        return [];
-    }
-}
-// ==== AI smart egress (same structure as Sepidar panel) ====
-// Gemini/ChatGPT-class endpoints often reject datacenter egress (or
-// blocked-country egress), so AI traffic prefers relays explicitly flagged
-// `#AI` (clean-country relays). List shared with Sepidar for agency-wide
-// consistent behavior. Plain google.com is intentionally NOT listed.
-const AI_LLM_SUFFIXES = [
-    "gemini.google.com",
-    "generativelanguage.googleapis.com",
-    "ai.google.dev",
-    "bard.google.com",
-    "openai.com",
-    "chatgpt.com",
-    "anthropic.com",
-    "claude.ai",
-    "copilot.microsoft.com",
-    "bing.com",
-    "meta.ai",
-    "x.ai",
-    "grok.com",
-    "deepseek.com",
-    "perplexity.ai",
-    "poe.com",
-    "character.ai",
-    "you.com",
-    "mistral.ai",
-    "chat.mistral.ai",
-];
-function isAiDomain(d) {
-    try {
-        const v = String(d || "")
-            .toLowerCase()
-            .replace(/\.$/, "")
-            .trim();
-        if (!v || v.length > 253) return false;
-        for (const sfx of AI_LLM_SUFFIXES) {
-            if (v === sfx || v.endsWith("." + sfx)) return true;
-        }
-        return false;
-    } catch (e) {
-        return false;
-    }
-}
-// TLS SNI sniffing (pure, bounds-checked): extracts the Server Name from a
-// ClientHello so IP-literal destinations can still be classified. Returns
-// the hostname or null. Never throws.
-function sniffSniFromHello(data) {
-    try {
-        const raw =
-            data instanceof Uint8Array ? data : new Uint8Array(data || []);
-        if (!raw || raw.byteLength <= 43) return null;
-        if (raw[0] !== 0x16 || raw[5] !== 0x01) return null;
-        let pos = 43;
-        if (pos + 1 > raw.byteLength) return null;
-        const sessionIdLen = raw[pos];
-        pos += 1 + sessionIdLen;
-        if (pos + 2 > raw.byteLength) return null;
-        const cipherSuitesLen = (raw[pos] << 8) | raw[pos + 1];
-        pos += 2 + cipherSuitesLen;
-        if (pos + 1 > raw.byteLength) return null;
-        const compMethodsLen = raw[pos];
-        pos += 1 + compMethodsLen;
-        if (pos + 2 > raw.byteLength) return null;
-        const extensionsLen = (raw[pos] << 8) | raw[pos + 1];
-        pos += 2;
-        const endPos = Math.min(pos + extensionsLen, raw.byteLength);
-        while (pos + 4 <= endPos) {
-            const extType = (raw[pos] << 8) | raw[pos + 1];
-            const extLen = (raw[pos + 2] << 8) | raw[pos + 3];
-            pos += 4;
-            if (extType === 0x0000) {
-                if (pos + 2 > raw.byteLength) return null;
-                const sniPos = pos + 2;
-                if (raw[sniPos] === 0x00) {
-                    if (sniPos + 3 > raw.byteLength) return null;
-                    const sniLen =
-                        (raw[sniPos + 1] << 8) | raw[sniPos + 2];
-                    if (sniLen <= 0 || sniLen > 253) return null;
-                    if (sniPos + 3 + sniLen > raw.byteLength) return null;
-                    try {
-                        return new TextDecoder().decode(
-                            raw.slice(sniPos + 3, sniPos + 3 + sniLen),
-                        );
-                    } catch (e) {
-                        return null;
-                    }
-                }
-                return null;
-            }
-            pos += extLen;
-        }
-        return null;
-    } catch (e) {
-        return null;
-    }
-}
-// `#AI` flag detector for relay tokens. Nahan `#suffix` is otherwise a
-// display name, so detection is purely additive: names are never rewritten,
-// and a lone `#AI` simply doubles as the flag.
-function relayAiFlag(tok) {
-    try {
-        const s = String(tok || "");
-        const hi = s.indexOf("#");
-        if (hi === -1) return false;
-        const toks = s.slice(hi + 1).split(/[\s,;]+/);
-        for (const t of toks) {
-            if (String(t).toLowerCase() === "ai") return true;
-        }
-        return false;
-    } catch (e) {
-        return false;
-    }
-}
-// Stable-partition AI-flagged relay tokens to the front.
-// Returns {list, moved}: moved=false means order is untouched.
-function orderAiFirstTokens(pips) {
-    try {
-        const list = Array.isArray(pips) ? pips : [];
-        const ai = [];
-        const rest = [];
-        for (const t of list) {
-            if (relayAiFlag(t)) ai.push(t);
-            else rest.push(t);
-        }
-        if (ai.length === 0) return { list, moved: false };
-        return { list: ai.concat(rest), moved: true };
-    } catch (e) {
-        return { list: [], moved: false };
-    }
-}
-function buildProbeHello(sni) {
-    try {
-        const sn = new TextEncoder()
-            .encode(String(sni || "cloudflare-dns.com"))
-            .slice(0, 64);
-        const rnd = new Uint8Array(32);
-        try {
-            crypto.getRandomValues(rnd);
-        } catch (e) {}
-        const body = [0x03, 0x03];
-        for (let i = 0; i < 32; i++) body.push(rnd[i]);
-        body.push(0x00);
-        // Proven cipher set (same as Sepidar agency-wide): ECDHE suites for
-        // ECDSA+RSA certs. The old SNI-only hello false-failed on strict
-        // servers; groups/point-formats/sigalgs below fix that (verified live
-        // with real ServerHello replies from production relays).
-        const cs = [0xc0, 0x2b, 0xc0, 0x2f, 0xcc, 0xa8, 0xc0, 0x13];
-        body.push((cs.length >> 8) & 0xff, cs.length & 0xff);
-        for (const b of cs) body.push(b);
-        body.push(0x01, 0x00);
-        const ext = [0x00, 0x00];
-        const namePart = [0x00, (sn.length >> 8) & 0xff, sn.length & 0xff];
-        for (let i = 0; i < sn.length; i++) namePart.push(sn[i]);
-        const entry = [
-            (namePart.length >> 8) & 0xff,
-            namePart.length & 0xff,
-        ].concat(namePart);
-        const extBlock = [(entry.length >> 8) & 0xff, entry.length & 0xff].concat(entry);
-        for (const b of extBlock) ext.push(b);
-        // supported_groups (x25519, secp256r1), ec_point_formats, signature_algorithms
-        const extraExts = [
-            0x00, 0x0a, 0x00, 0x06, 0x00, 0x04, 0x00, 0x1d, 0x00, 0x17,
-            0x00, 0x0b, 0x00, 0x02, 0x01, 0x00,
-            0x00, 0x0d, 0x00, 0x08, 0x00, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01,
-        ];
-        for (const b of extraExts) ext.push(b);
-        body.push((ext.length >> 8) & 0xff, ext.length & 0xff);
-        for (const b of ext) body.push(b);
-        const out = [0x16, 0x03, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
-        out[3] = ((body.length + 4) >> 8) & 0xff;
-        out[4] = (body.length + 4) & 0xff;
-        out[6] = (body.length >> 16) & 0xff;
-        out[7] = (body.length >> 8) & 0xff;
-        out[8] = body.length & 0xff;
-        const full = out.concat(body);
-        return new Uint8Array(full);
-    } catch (e) {
-        return null;
-    }
-}
-async function probeRelayOnce(host, port, timeoutMs) {
-    let sock = null;
-    const PM = timeoutMs > 0 ? timeoutMs : 4000;
-    try {
-        const probePort = port || 443;
-        sock = connect({ hostname: host, port: probePort });
-        await withTimeout(sock.opened, PM, "probe-timeout");
-        // Non-TLS ports (e.g. :80 relays): a completed TCP open already
-        // proves liveness. Sending a TLS hello there would always fail and
-        // bury healthy relays, so stop here.
-        if (!RELAY_TLS_PORTS.has(String(probePort))) return true;
-        const hello = buildProbeHello("cloudflare-dns.com");
-        if (!hello) return false;
-        const writer = sock.writable.getWriter();
-        try {
-            await writeSocketWithTimeout(sock, writer, hello, PM);
-        } finally {
-            try {
-                writer.releaseLock();
-            } catch (e) {}
-        }
-        const reader = sock.readable.getReader();
-        try {
-            const res = await withTimeout(
-                reader.read(),
-                PM,
-                "probe-timeout",
-            );
-            if (!res || res.done || !res.value) return false;
-            const b = new Uint8Array(res.value);
-            return b.length >= 2 && b[0] === 0x16 && b[1] === 0x03;
-        } finally {
-            try {
-                reader.releaseLock();
-            } catch (e) {}
-        }
-    } catch (e) {
-        return false;
-    } finally {
-        try {
-            if (sock) sock.close();
-        } catch (e) {}
-    }
-}
-// Two-stage verdict (same as Sepidar agency-wide): fast stage (4s), then one
-// retry with a longer timeout (7s) so a slow-but-healthy relay is not wrongly
-// counted dead. Only the final verdict feeds fail counts.
-async function probeRelayVerdict(host, port) {
-    try {
-        if (await probeRelayOnce(host, port, 4000)) return true;
-    } catch (e) {}
-    try {
-        return await probeRelayOnce(host, port, 7000);
-    } catch (e) {
-        return false;
-    }
-}
-function collectRelayInventory() {
-    const out = new Map();
-    const addRaw = (raw) => {
-        try {
-            String(raw || "")
-                .split(/[\r\n,;]+/)
-                .forEach((t) => {
-                    const rk = relayKeyOf(t);
-                    if (rk && !out.has(rk.key))
-                        out.set(rk.key, { host: rk.host, port: rk.port });
-                });
-        } catch (e) {}
+    const 本地值20171 = {
+      zh: {
+        workerRegion: 'Worker地区: ',
+        detectionMethod: '检测方式: ',
+        proxyIPStatus: '${解码64('UHJveHlJUOeKtuaAgTog')}',
+        currentIP: '当前使用IP: ',
+        regionMatch: '地区匹配: ',
+        regionNames: {
+          'CF': '${解码64('8J+MkCDlrpjmlrnnm7Tov54=')}',
+          'HK': '🇭🇰 香港',
+          'US': '🇺🇸 美国',
+          'SG': '🇸🇬 新加坡',
+          'JP': '🇯🇵 日本',
+          'KR': '🇰🇷 韩国',
+          'DE': '🇩🇪 德国',
+          'SE': '🇸🇪 瑞典',
+          'NL': '🇳🇱 荷兰',
+          'FI': '🇫🇮 芬兰',
+          'GB': '🇬🇧 英国'
+        },
+        customIPMode: '${解码64('6Ieq5a6a5LmJUHJveHlJUOaooeW8jyAocOWPmOmHj+WQr+eUqCk=')}',
+        customIPModeDesc: '自定义IP模式 (已禁用地区匹配)',
+        usingCustomProxyIP: '${解码64('5L2/55So6Ieq5a6a5LmJUHJveHlJUDog')}',
+        customIPConfig: ' (p变量配置)',
+        customIPModeDisabled: '自定义IP模式，地区选择已禁用',
+        manualRegion: '手动指定地区',
+        manualRegionDesc: ' (手动指定)',
+        proxyIPAvailable: '${解码64('MTAvMTAg5Y+v55SoIChQcm94eUlQ5Z+f5ZCN6aKE6K6+5Y+v55SoKQ==')}',
+        smartSelection: '智能就近选择中',
+        sameRegionIP: '同地区IP可用 (1个)',
+        cloudflareDetection: '${解码64('5a6Y5pa555u06L+e')}',
+        detectionFailed: '检测失败',
+        unknown: '未知'
+      },
+      fa: {
+        workerRegion: 'منطقه Worker: ',
+        detectionMethod: 'روش تشخیص: ',
+        proxyIPStatus: '${解码64('2YjYtti524zYqiBQcm94eUlQOiA=')}',
+        currentIP: 'IP فعلی: ',
+        regionMatch: 'تطبیق منطقه: ',
+        regionNames: {
+          'CF': '🌐 مستقیم رسمی',
+          'HK': '🇭🇰 هنگ کنگ',
+          'US': '🇺🇸 آمریکا',
+          'SG': '🇸🇬 سنگاپور',
+          'JP': '🇯🇵 ژاپن',
+          'KR': '🇰🇷 کره جنوبی',
+          'DE': '🇩🇪 آلمان',
+          'SE': '🇸🇪 سوئد',
+          'NL': '🇳🇱 هلند',
+          'FI': '🇫🇮 فنلاند',
+          'GB': '🇬🇧 بریتانیا'
+        },
+        customIPMode: '${解码64('2K3Yp9mE2KogUHJveHlJUCDYs9mB2KfYsdi024wgKNmF2KrYutuM2LEgcCDZgdi52KfZhCDYp9iz2Kop')}',
+        customIPModeDesc: 'حالت IP سفارشی (تطبیق منطقه غیرفعال است)',
+        usingCustomProxyIP: '${解码64('2KfYs9iq2YHYp9iv2Ycg2KfYsiBQcm94eUlQINiz2YHYp9ix2LTbjDog')}',
+        customIPConfig: ' (پیکربندی متغیر p)',
+        customIPModeDisabled: 'حالت IP سفارشی، انتخاب منطقه غیرفعال است',
+        manualRegion: 'تعیین منطقه دستی',
+        manualRegionDesc: ' (تعیین دستی)',
+        proxyIPAvailable: '${解码64('MTAvMTAg2K/YsSDYr9iz2KrYsdizICjYr9in2YXZhtmHINm+24zYtOKAjNmB2LHYtiBQcm94eUlQINiv2LEg2K/Ys9iq2LHYsyDYp9iz2Kop')}',
+        smartSelection: 'انتخاب هوشمند نزدیک در حال انجام است',
+        sameRegionIP: 'IP هم‌منطقه در دسترس است (1)',
+        cloudflareDetection: 'اتصال مستقیم رسمی',
+        detectionFailed: 'تشخیص ناموفق',
+        unknown: 'ناشناخته'
+      }
     };
+    const 翻译值20170 = 本地值20171[是否值20172 ? 'fa' : 'zh'];
+    let 值地区20169 = 'US'; // 默认值
+    let 是否自定义地址值 = false;
+    let 是否手动地区值 = false;
     try {
-        addRaw(sysConfig.backupRelay);
-        addRaw(sysConfig.customRelay);
-        (sysConfig.users || []).forEach((u) => {
-            try {
-                addRaw(u.proxyIp);
-            } catch (e) {}
-        });
-    } catch (e) {}
-    return Array.from(out.values());
-}
-function pruneAutomationOff() {
-    try {
-        const v = sysConfig.autoPruneRelays;
-        if (v === undefined || v === null) return false;
-        const s = String(v).trim().toLowerCase();
-        return s === "0" || s === "off" || s === "no" || s === "false";
-    } catch (e) {
-        return false;
+      const 响应20168 = await fetch(window.location.pathname + '/region');
+      const 数据20167 = await 响应20168.json();
+      if (数据20167.region === 'CUSTOM') {
+        是否自定义地址值 = true;
+        值地区20169 = 'CUSTOM';
+
+        // 获取自定义IP的详细信息
+        const 自定义地址值 = 数据20167.ci || 翻译值20170.unknown;
+        值值20179.innerHTML = 翻译值20170.detectionMethod + '<span style="color: #ffb400;">⚙️ ' + 翻译值20170.customIPMode + '</span>';
+        地区状态.innerHTML = 翻译值20170.workerRegion + '<span style="color: #ffb400;">🔧 ' + 翻译值20170.customIPModeDesc + '</span>';
+
+        // 显示自定义IP配置状态，包含具体IP
+        if (备用状态) 备用状态.innerHTML = 翻译值20170.proxyIPStatus + '<span style="color: #ffb400;">🔧 ' + 翻译值20170.usingCustomProxyIP + 自定义地址值 + '</span>';
+        if (当前地址) 当前地址.innerHTML = 翻译值20170.currentIP + '<span style="color: #ffb400;">✅ ' + 自定义地址值 + 翻译值20170.customIPConfig + '</span>';
+        if (地区值) 地区值.innerHTML = 翻译值20170.regionMatch + '<span style="color: #ffb400;">⚠️ ' + 翻译值20170.customIPModeDisabled + '</span>';
+        return; // 提前返回，不执行后续的地区匹配逻辑
+      } else if (数据20167.detectionMethod === '手动指定地区' || 数据20167.detectionMethod === 'تعیین منطقه دستی') {
+        是否手动地区值 = true;
+        值地区20169 = 数据20167.region;
+        值值20179.innerHTML = 翻译值20170.detectionMethod + '<span style="color: #00b380;">' + 翻译值20170.manualRegion + '</span>';
+        地区状态.innerHTML = 翻译值20170.workerRegion + '<span style="color: #00ff9d;">🎯 ' + 翻译值20170.regionNames[值地区20169] + 翻译值20170.manualRegionDesc + '</span>';
+
+        // 显示配置状态而不是检测状态
+        if (备用状态) 备用状态.innerHTML = 翻译值20170.proxyIPStatus + '<span style="color: #00ff9d;">✅ ' + 翻译值20170.proxyIPAvailable + '</span>';
+        if (当前地址) 当前地址.innerHTML = 翻译值20170.currentIP + '<span style="color: #00ff9d;">✅ ' + 翻译值20170.smartSelection + '</span>';
+        if (地区值) 地区值.innerHTML = 翻译值20170.regionMatch + '<span style="color: #00ff9d;">✅ ' + 翻译值20170.sameRegionIP + '</span>';
+        return; // 提前返回，不执行后续的地区匹配逻辑
+      } else if (数据20167.region && 翻译值20170.regionNames[数据20167.region]) {
+        值地区20169 = 数据20167.region;
+      }
+      值值20179.innerHTML = 翻译值20170.detectionMethod + '<span style="color: #00ff9d;">' + 翻译值20170.cloudflareDetection + '</span>';
+    } catch (事件值20166) {
+      值值20179.innerHTML = 翻译值20170.detectionMethod + '<span style="color: #ff3860;">' + 翻译值20170.detectionFailed + '</span>';
     }
-}
-let RELAY_SNAPSHOT_LOADED = false;
-async function loadRelayHealthSnapshot(env) {
-    try {
-        if (RELAY_SNAPSHOT_LOADED) return;
-        if (RELAY_Q.size > 0) {
-            RELAY_SNAPSHOT_LOADED = true;
-            return;
-        }
-        const raw = await d1Get(env, "relay_health");
-        if (!raw) return;
-        const snap = JSON.parse(raw);
-        const now = Date.now();
-        const q = snap.q || {};
-        for (const k of Object.keys(q)) {
-            if (q[k] && q[k] > now && RELAY_Q.size < 2000)
-                RELAY_Q.set(k, { fail: 0, until: q[k], probeFail: 0 });
-        }
-        RELAY_SNAPSHOT_LOADED = true;
-    } catch (e) {}
-}
-async function saveRelayHealthSnapshot(env) {
-    try {
-        if (Date.now() - lastHealthSave < PROBE_INTERVAL_MS) return;
-        lastHealthSave = Date.now();
-        const q = {};
-        let active = 0;
-        for (const [k, v] of RELAY_Q.entries()) {
-            if (v && v.until && v.until > Date.now()) {
-                q[k] = v.until;
-                active++;
-            }
-        }
-        if (active > 0) {
-            // Never byte-slice JSON: slicing can produce invalid state the
-            // next isolate cannot parse. Evict oldest entries instead.
-            const entries = Object.entries(q).sort((a, b) => a[1] - b[1]);
-            let payload = JSON.stringify({ q });
-            while (payload.length > 8000 && entries.length > 0) {
-                delete q[entries.shift()[0]];
-                payload = JSON.stringify({ q });
-            }
-            if (payload.length > 8000) {
-                try {
-                    console.error("[relay] health snapshot too large, skip");
-                } catch (e) {}
-                return;
-            }
-            await d1Put(env, "relay_health", payload);
-        } else {
-            await d1Put(env, "relay_health", "{}");
-        }
-    } catch (e) {}
-}
-async function probeDeadRelays(env) {
-    try {
-        if (pruneAutomationOff()) return;
-        if (!env || !env.IOT_DB) return;
-        const runnerLease = await acquireNahanRunnerLock(
-            env,
-            "probe",
-            PROBE_INTERVAL_MS,
-        );
-        if (!runnerLease) return;
-        try {
-        const now = Date.now();
-        if (now - lastProbeTs < PROBE_INTERVAL_MS) return;
-        lastProbeTs = now;
-        await loadRelayHealthSnapshot(env);
-        const inv = collectRelayInventory();
-        if (inv.length === 0) return;
-        // Sick-first priority, then round-robin rotation so relays past the
-        // per-round cap are not starved forever (same guarantee as Sepidar).
-        const scored = inv
-            .map((r) => {
-                const e = RELAY_Q.get(r.host + "|" + r.port);
-                return { r, pf: (e && e.probeFail) || 0 };
-            })
-            .sort(
-                (a, b) =>
-                    b.pf - a.pf ||
-                    (a.r.host < b.r.host ? -1 : 1),
-            );
-        // Floating cap: under traffic pressure (breaker) probe half as many
-        // so isolate CPU stays with real tunnels.
-        let probeCap = PROBE_MAX_PER_ROUND;
-        try {
-            if (breakerLevel() >= 1)
-                probeCap = Math.max(1, Math.floor(probeCap / 2));
-        } catch (e) {}
-        if (typeof probeCursor !== "number") probeCursor = 0;
-        // Persistent cursor: isolates are ephemeral, so an in-memory cursor
-        // alone restarts at zero on every cold start and starves later relays.
-        try {
-            if (scored.length > 0) {
-                const stored = await d1Get(env, "nahan_runner_probe_cursor");
-                const n = Number(stored);
-                if (Number.isFinite(n) && n >= 0)
-                    probeCursor = Math.floor(n) % scored.length;
-            }
-        } catch (e) {}
-        const rotated = [];
-        for (let i = 0; i < scored.length; i++)
-            rotated.push(scored[(probeCursor + i) % scored.length]);
-        probeCursor = (probeCursor + probeCap) % scored.length;
-        try {
-            await d1Put(env, "nahan_runner_probe_cursor", String(probeCursor));
-        } catch (e) {}
-        const picked = rotated.slice(0, probeCap);
-        // Probes run in parallel (bounded to probeCap relays) so
-        // a full round fits the background-task budget; mutations below
-        // stay strictly sequential to avoid concurrent sys_config writes.
-        const results = await Promise.all(
-            picked.map(async ({ r }) => {
-                let ok = false;
-                try {
-                    ok = await probeRelayVerdict(r.host, r.port);
-                } catch (e) {
-                    ok = false;
-                }
-                return { r, ok };
-            }),
-        );
-        for (const { r } of results.filter((x) => x.ok)) {
-            recordRelaySuccess(r.host, r.port, true);
-        }
-        for (const { r } of results.filter((x) => !x.ok)) {
-            const k = r.host + "|" + r.port;
-            let e = RELAY_Q.get(k);
-            if (!e) {
-                e = { fail: 0, until: 0, probeFail: 0 };
-                RELAY_Q.set(k, e);
-            }
-            e.probeFail = (e.probeFail || 0) + 1;
-            e.until = Date.now() + 600000;
-            if (e.probeFail >= PROBE_FAIL_LIMIT) {
-                try {
-                    await buryDeadRelay(env, r.host, r.port);
-                } catch (err) {}
-            }
-        }
-        await saveRelayHealthSnapshot(env);
-        } finally {
-            await releaseNahanRunnerLock(env, runnerLease);
-        }
-    } catch (e) {}
-}
-async function buryDeadRelay(env, host, port) {
-    try {
-        if (!env || !env.IOT_DB || !host) return false;
-        if (pruneAutomationOff()) return false;
-        const hostLower = String(host).toLowerCase();
-        const portN = port || 443;
-        const deadKey = hostLower + "|" + portN;
-        const keyMatches = (tok) => {
-            try {
-                const rk = relayKeyOf(tok);
-                return !!rk && rk.key === deadKey;
-            } catch (e) {
-                return false;
-            }
-        };
-        const stripDead = (raw) => {
-            const parts = String(raw || "")
-                .split(/[\r\n,;]+/)
-                .map((s) => s.trim())
-                .filter(Boolean);
-            const kept = parts.filter((t) => !keyMatches(t));
-            return { kept, removed: parts.length - kept.length };
-        };
-        // AI flag of the buried relay (if any placement had `#AI`), so the
-        // grave remembers it and resurrect restores it.
-        const tokenHasAi = (raw) => {
-            try {
-                const parts = String(raw || "")
-                    .split(/[\r\n,;]+/)
-                    .map((s) => s.trim())
-                    .filter(Boolean);
-                for (const t of parts) {
-                    if (keyMatches(t) && relayAiFlag(t)) return true;
-                }
-                return false;
-            } catch (e) {
-                return false;
-            }
-        };
-        // Two-phase burial (Sepidar-grade): scan everything FIRST without
-        // mutating, persist the grave BEFORE touching live rotation, then
-        // remove from rotation. A storage failure can never silently destroy
-        // rotation entries without leaving a recovery record behind.
-        const lists = [];
-        let aiKeep = false;
-        const globalChanges = [];
-        const userChanges = [];
-        try {
-            for (const field of ["backupRelay", "customRelay"]) {
-                const raw = sysConfig[field] || "";
-                if (!raw || raw.toLowerCase().indexOf(hostLower) === -1)
-                    continue;
-                const { kept, removed } = stripDead(raw);
-                if (removed > 0) {
-                    if (tokenHasAi(raw)) aiKeep = true;
-                    lists.push("global:" + field);
-                    if (kept.length > 0)
-                        globalChanges.push({ field, next: kept.join(",") });
-                }
-            }
-        } catch (e) {}
-        try {
-            const users = sysConfig.users || [];
-            for (const u of users) {
-                try {
-                    const raw = u.proxyIp || "";
-                    if (
-                        !raw ||
-                        raw.toLowerCase().indexOf(hostLower) === -1
-                    )
-                        continue;
-                    const { kept, removed } = stripDead(raw);
-                    if (removed === 0) continue;
-                    // Sole/last relay of a user is deliberately preserved:
-                    // remember the placement but do not claim a burial.
-                    if (kept.length === 0) continue;
-                    if (tokenHasAi(raw)) aiKeep = true;
-                    lists.push("user:" + (u.name || u.id));
-                    userChanges.push({ u, next: kept.join(",") });
-                } catch (e) {}
-            }
-        } catch (e) {}
-        // Nothing was actually removed from live rotation: do not clear
-        // quarantine and do not create a misleading grave.
-        if (globalChanges.length === 0 && userChanges.length === 0)
-            return false;
-        try {
-            let g = {};
-            try {
-                g = JSON.parse((await d1Get(env, "relay_graveyard")) || "{}");
-            } catch (e) {
-                g = {};
-            }
-            const prev = g[deadKey] || {};
-            let flaps = [];
-            try {
-                const fm = JSON.parse(
-                    (await d1Get(env, "relay_flaps")) || "{}",
-                );
-                flaps = Array.isArray(fm[deadKey])
-                    ? fm[deadKey].filter((t) => nowTs() - t < FLAP_WINDOW_MS)
-                    : [];
-            } catch (e) {
-                flaps = [];
-            }
-            const entry = {
-                host: hostLower,
-                port: portN,
-                ai: !!(prev.ai || aiKeep),
-                buriedAt: Date.now(),
-                lists: Array.from(
-                    new Set([].concat(prev.lists || [], lists)),
-                ).slice(0, 100),
-                burials: (prev.burials || 0) + 1,
-                healthyStreak: 0,
-                unstable: flaps.length >= FLAP_LIMIT,
-            };
-            g[deadKey] = entry;
-            // Never evict the grave we just created to stay under a cap,
-            // and never byte-slice JSON: evict oldest entries instead.
-            const gk = Object.keys(g);
-            if (gk.length > 50) {
-                const candidates = gk.filter((k) => k !== deadKey);
-                candidates.sort(
-                    (a, b) =>
-                        ((g[a] && g[a].buriedAt) || 0) -
-                        ((g[b] && g[b].buriedAt) || 0),
-                );
-                for (const drop of candidates.slice(
-                    0,
-                    Math.max(0, gk.length - 50),
-                )) {
-                    try {
-                        delete g[drop];
-                    } catch (e) {}
-                }
-            }
-            let gravePayload = JSON.stringify(g);
-            if (gravePayload.length > 200000) {
-                const ordered = Object.keys(g)
-                    .filter((k) => k !== deadKey)
-                    .sort(
-                        (a, b) =>
-                            ((g[a] && g[a].buriedAt) || 0) -
-                            ((g[b] && g[b].buriedAt) || 0),
-                    );
-                for (const drop of ordered) {
-                    delete g[drop];
-                    gravePayload = JSON.stringify(g);
-                    if (gravePayload.length <= 200000) break;
-                }
-            }
-            if (gravePayload.length > 200000) return false;
-            try {
-                await d1PutStrict(env, "relay_graveyard", gravePayload);
-            } catch (e) {
-                return false;
-            }
-            // Grave is durable: now remove from live rotation. Any partial
-            // D1 failure here can be healed later by resurrectRelay().
-            const prevGlobals = {};
-            const prevUsers = new Map();
-            try {
-                for (const c of globalChanges)
-                    prevGlobals[c.field] = sysConfig[c.field];
-                for (const c of userChanges) prevUsers.set(c.u, c.u.proxyIp);
-                for (const c of globalChanges) sysConfig[c.field] = c.next;
-                for (const c of userChanges) c.u.proxyIp = c.next;
-                await d1PutStrict(env, "sys_config", JSON.stringify(sysConfig));
-            } catch (e) {
-                try {
-                    for (const k of Object.keys(prevGlobals))
-                        sysConfig[k] = prevGlobals[k];
-                    for (const [u, prev] of prevUsers) u.proxyIp = prev;
-                } catch (_) {}
-                return false;
-            }
-            try {
-                console.error(
-                    "relay-buried: " + deadKey + " from " + lists.join(","),
-                );
-            } catch (e) {}
-        } catch (e) {
-            return false;
-        }
-        return true;
-    } catch (e) {
-        return false;
+    地区状态.innerHTML = 翻译值20170.workerRegion + '<span style="color: #00ff9d;">✅ ' + 翻译值20170.regionNames[值地区20169] + '</span>';
+
+    // 直接显示配置状态，不再进行检测
+    if (备用状态) {
+      备用状态.innerHTML = 翻译值20170.proxyIPStatus + '<span style="color: #00ff9d;">✅ ' + 翻译值20170.proxyIPAvailable + '</span>';
     }
-}
-function nowTs() {
-    return Date.now();
-}
-let lastResurrectChanged = false;
-async function resurrectRelay(env, key, entry) {
-    // Returns true when the grave entry can be closed (re-added or already
-    // present). Only an actual restoration counts as a change: flap history
-    // must not be inflated by already-present relays.
-    lastResurrectChanged = false;
-    try {
-        const host = String(entry.host || "").toLowerCase();
-        if (!host) return false;
-        const port = entry.port || 443;
-        // Restore the #AI flag when the buried relay had one (names are
-        // re-added bare, as before — only the flag round-trips).
-        let token = host + (port && port !== 443 ? ":" + port : "");
-        try {
-            if (entry.ai === true) token += "#AI";
-        } catch (e) {}
-        const addToken = (raw) => {
-            const parts = String(raw || "")
-                .split(/[\r\n,;]+/)
-                .map((s) => s.trim())
-                .filter(Boolean);
-            for (const t of parts) {
-                try {
-                    const rk = relayKeyOf(t);
-                    if (rk && rk.key === key) return String(raw || "");
-                } catch (e) {}
-            }
-            return (raw && String(raw).trim()
-                ? String(raw).replace(/,+$/, "") + ","
-                : "") + token;
-        };
-        let restoreChanged = false;
-        for (const l of entry.lists || []) {
-            try {
-                if (l === "global:backupRelay") {
-                    const before = sysConfig.backupRelay;
-                    const after = addToken(before);
-                    if (after !== before) {
-                        sysConfig.backupRelay = after;
-                        restoreChanged = true;
-                    }
-                } else if (l === "global:customRelay") {
-                    const before = sysConfig.customRelay;
-                    const after = addToken(before);
-                    if (after !== before) {
-                        sysConfig.customRelay = after;
-                        restoreChanged = true;
-                    }
-                } else if (l.startsWith("user:")) {
-                    const nm = l.slice(5);
-                    const u = (sysConfig.users || []).find(
-                        (x) => x && (x.name === nm || x.id === nm),
-                    );
-                    // Missing user (deleted account) is tolerated: it must
-                    // not block an otherwise valid resurrection.
-                    if (!u) continue;
-                    const before = u.proxyIp;
-                    const after = addToken(before);
-                    if (after !== before) {
-                        u.proxyIp = after;
-                        restoreChanged = true;
-                    }
-                }
-            } catch (e) {
-                return false;
-            }
-        }
-        if (!restoreChanged) {
-            try {
-                console.error("relay-already-present: " + key);
-            } catch (e) {}
-            return true;
-        }
-        try {
-            await d1PutStrict(env, "sys_config", JSON.stringify(sysConfig));
-        } catch (e) {
-            return false;
-        }
-        lastResurrectChanged = true;
-        try {
-            console.error("relay-resurrected: " + key);
-        } catch (e) {}
-        return true;
-    } catch (e) {
-        return false;
+    if (当前地址) {
+      当前地址.innerHTML = 翻译值20170.currentIP + '<span style="color: #00ff9d;">✅ ' + 翻译值20170.smartSelection + '</span>';
     }
-}
-async function probeGraveyard(env) {
-    try {
-        if (pruneAutomationOff()) return;
-        if (!env || !env.IOT_DB) return;
-        const runnerLease = await acquireNahanRunnerLock(
-            env,
-            "graveyard",
-            GRAVE_INTERVAL_MS,
-        );
-        if (!runnerLease) return;
-        try {
-        const now = Date.now();
-        if (now - lastGraveTs < GRAVE_INTERVAL_MS) return;
-        lastGraveTs = now;
-        let g = {};
-        try {
-            g = JSON.parse((await d1Get(env, "relay_graveyard")) || "{}");
-        } catch (e) {
-            return;
-        }
-        const keys = Object.keys(g).slice(0, 200);
-        keys.sort(
-            (a, b) => ((g[a] && g[a].buriedAt) || 0) - ((g[b] && g[b].buriedAt) || 0),
-        );
-        if (keys.length === 0) return;
-        // Round-robin over oldest-first order so graves past the per-round
-        // cap are not starved (same guarantee as Sepidar).
-        if (typeof graveCursor !== "number") graveCursor = 0;
-        try {
-            const stored = await d1Get(env, "nahan_runner_grave_cursor");
-            const n = Number(stored);
-            if (Number.isFinite(n) && n >= 0)
-                graveCursor = Math.floor(n) % keys.length;
-        } catch (e) {}
-        const grotated = [];
-        for (let i = 0; i < keys.length; i++)
-            grotated.push(keys[(graveCursor + i) % keys.length]);
-        // Floating cap under traffic pressure (breaker), min 1.
-        let graveCap = GRAVE_MAX_PER_ROUND;
-        try {
-            if (breakerLevel() >= 1)
-                graveCap = Math.max(1, Math.floor(graveCap / 2));
-        } catch (e) {}
-        graveCursor = (graveCursor + graveCap) % keys.length;
-        try {
-            await d1Put(env, "nahan_runner_grave_cursor", String(graveCursor));
-        } catch (e) {}
-        // Probes in parallel (bounded); grave/config mutations below stay
-        // sequential to avoid concurrent sys_config writes.
-        const graveTargets = grotated.slice(0, graveCap);
-        const graveResults = await Promise.all(
-            graveTargets.map(async (k) => {
-                const entry = g[k];
-                if (!entry || !entry.host) return { k, ok: null };
-                let ok = false;
-                try {
-                    ok = await probeRelayVerdict(entry.host, entry.port || 443);
-                } catch (e) {
-                    ok = false;
-                }
-                return { k, ok };
-            }),
-        );
-        let dirty = false;
-        for (const { k, ok } of graveResults) {
-            const entry = g[k];
-            if (!entry || !entry.host) {
-                delete g[k];
-                dirty = true;
-                continue;
-            }
-            if (ok === null) continue;
-            if (ok) {
-                entry.healthyStreak = (entry.healthyStreak || 0) + 1;
-                if (entry.healthyStreak >= GRAVE_HEALTHY_NEED) {
-                    // Close the grave ONLY on confirmed success, never on a
-                    // half-finished resurrect (otherwise placements are lost).
-                    let okR = false;
-                    try {
-                        okR = await resurrectRelay(env, k, entry);
-                    } catch (e) {
-                        okR = false;
-                    }
-                    if (!okR) {
-                        entry.healthyStreak = 0;
-                        dirty = true;
-                        continue;
-                    }
-                    // Flap history only on real restoration: an already-live
-                    // relay must not inflate flap counts.
-                    if (lastResurrectChanged) {
-                        try {
-                            const fm = JSON.parse(
-                                (await d1Get(env, "relay_flaps")) || "{}",
-                            );
-                            const arr = Array.isArray(fm[k]) ? fm[k] : [];
-                            arr.push(Date.now());
-                            fm[k] = arr
-                                .filter((t) => Date.now() - t < FLAP_WINDOW_MS)
-                                .slice(-10);
-                            await d1Put(env, "relay_flaps", JSON.stringify(fm));
-                        } catch (e) {}
-                    }
-                    recordRelaySuccess(entry.host, entry.port || 443, true);
-                    delete g[k];
-                    dirty = true;
-                } else {
-                    dirty = true;
-                }
-            } else {
-                try {
-                    console.error("relay-grave-failed: " + k);
-                } catch (e) {}
-                entry.healthyStreak = 0;
-                dirty = true;
-            }
-        }
-        if (dirty) await d1Put(env, "relay_graveyard", JSON.stringify(g));
-        } finally {
-            await releaseNahanRunnerLock(env, runnerLease);
-        }
-    } catch (e) {}
-}
-// Reconnect-storm backoff (per-IP, in-memory): generous caps compatible
-// with mobile CGNAT. Over the cap -> tarpit (slow down); massive flood ->
-// 429. Prevents handshake pile-ups behind a flapping relay.
-const WS_RATE = new Map();
-function wsRateCheck(ip) {
-    try {
-        const now = Date.now();
-        let r = WS_RATE.get(ip);
-        if (!r || now - r.ts > 60000) {
-            r = { n: 0, ts: now };
-            WS_RATE.set(ip, r);
-        }
-        r.n++;
-        if (WS_RATE.size > 10000) WS_RATE.clear();
-        if (r.n > 400) return "refuse";
-        if (r.n > 120) return "tarpit";
-        return "ok";
-    } catch (e) {
-        return "ok";
+    if (地区值) {
+      地区值.innerHTML = 翻译值20170.regionMatch + '<span style="color: #00ff9d;">✅ ' + 翻译值20170.sameRegionIP + '</span>';
     }
-}
-// Admin brute-force shield (in-memory, per IP): 15 bad keys in 15 min ->
-// temporary 429. Counts only failures, so normal admin/API-key traffic
-// (and linked-panel syncs with valid keys) is never affected.
-const LOGIN_ATTEMPTS = new Map();
-const LOGIN_FAIL_LIMIT = 15;
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-function authBlocked(ip) {
-    try {
-        const r = LOGIN_ATTEMPTS.get(ip);
-        if (!r) return false;
-        if (Date.now() - r.first > LOGIN_WINDOW_MS) {
-            LOGIN_ATTEMPTS.delete(ip);
-            return false;
-        }
-        return r.n >= LOGIN_FAIL_LIMIT;
-    } catch (e) {
-        return false;
+  } catch (错误20165) {
+    function 获取凭据20164(名称20163) {
+      const 值20162 = '; ' + document.cookie;
+      const 部分列表20161 = 值20162.split('; ' + 名称20163 + '=');
+      if (部分列表20161.length === 2) return 部分列表20161.pop().split(';').shift();
+      return null;
     }
-}
-function authFail(ip) {
-    try {
-        const now = Date.now();
-        let r = LOGIN_ATTEMPTS.get(ip);
-        if (!r || now - r.first > LOGIN_WINDOW_MS) r = { n: 0, first: now };
-        r.n++;
-        LOGIN_ATTEMPTS.set(ip, r);
-        if (LOGIN_ATTEMPTS.size > 10000) LOGIN_ATTEMPTS.clear();
-    } catch (e) {}
-}
-function authClear(ip) {
-    try {
-        LOGIN_ATTEMPTS.delete(ip);
-    } catch (e) {}
-}
-async function processTelemetryStream(env, ctx, wsRelayIdx) {
-    const [client, webSocket] = Object.values(new WebSocketPair());
-    webSocket.accept();
-    webSocket.binaryType = "arraybuffer";
-    startDataPipe(webSocket, env, ctx, wsRelayIdx);
-    return new Response(null, { status: 101, webSocket: client });
-}
-
-async function startDataPipe(webSocket, env, ctx, wsRelayIdx) {
-    activeConnections++;
-    try {
-        OPEN_WS++;
-    } catch (e) {}
-    // Per-connection byte counters (up+down). Flushed to usage on close.
-    let connBytesUp = 0;
-    let connBytesDown = 0;
-    // Relay ownership for this tunnel generation: only downstream bytes on
-    // THIS socket may confirm the selected relay (an old stream must never
-    // credit a new relay). Upstream is bounded so a flooding client cannot
-    // grow memory without limit.
-    let activeRelay = null;
-    let relayConfirmed = false;
-    let pendingUpBytes = 0;
-    let pendingUpItems = 0;
-    webSocket.addEventListener("close", () => {
-        activeConnections--;
-        try {
-            OPEN_WS = Math.max(0, OPEN_WS - 1);
-        } catch (e) {}
-        if (activeClientHash) {
-            let cur = activeConns.get(activeClientHash) || 0;
-            if (cur > 0) activeConns.set(activeClientHash, cur - 1);
-        }
-        try {
-            const totalConnBytes = connBytesUp + connBytesDown;
-            if (activeClientHash && totalConnBytes > 0) {
-                trackUsage(activeClientHash, totalConnBytes, env, ctx);
-            }
-        } catch (e) {}
-    });
-    webSocket.addEventListener("error", () => {});
-    let remoteSocket,
-        dataWriter,
-        isInit = true,
-        queue = Promise.resolve();
-    let activeClientHash = null;
-    webSocket.addEventListener("message", (event) => {
-        const size = event.data?.byteLength || 0;
-        pendingUpBytes += size;
-        pendingUpItems++;
-        if (
-            pendingUpBytes > UPSTREAM_QUEUE_MAX_BYTES ||
-            pendingUpItems > UPSTREAM_QUEUE_MAX_ITEMS
-        ) {
-            try {
-                webSocket.close();
-            } catch (e) {}
-            return;
-        }
-        queue = queue.then(async () => {
-            pendingUpBytes = Math.max(0, pendingUpBytes - size);
-            pendingUpItems = Math.max(0, pendingUpItems - 1);
-            try {
-                if (isInit) {
-                    isInit = false;
-                    const isModeAlpha = await parseSensorData(
-                        event.data,
-                        wsRelayIdx,
-                    );
-                    if (isModeAlpha) webSocket.send(new Uint8Array([0, 0]));
-                } else if (dataWriter) {
-                    // Timed write: a stalled TCP write must reject and tear
-                    // down the tunnel, never hang the queue forever (->1101).
-                    try {
-                        await writeSocketWithTimeout(
-                            remoteSocket,
-                            dataWriter,
-                            event.data,
-                            UPSTREAM_WRITE_TIMEOUT_MS,
-                        );
-                    } catch (werr) {
-                        closeTcpSocketQuietly(remoteSocket);
-                        try {
-                            releaseWriterQuietly(dataWriter);
-                        } catch (e) {}
-                        dataWriter = null;
-                        try {
-                            webSocket.close();
-                        } catch (e) {}
-                        return;
-                    }
-                    try {
-                        connBytesUp += event.data?.byteLength || 0;
-                    } catch (e) {}
-                }
-            } catch (err) {
-                webSocket.close();
-            }
-        });
-    });
-
-    async function parseSensorData(bufferData, wsRelayIdx) {
-        const view = new Uint8Array(bufferData);
-        let targetAddr = "",
-            targetPort = 0,
-            offset = 0,
-            isModeAlpha = false,
-            activeProfile = null;
-
-        if (view[0] === 0x00) {
-            isModeAlpha = true;
-
-            let clientHash = Array.from(view.slice(1, 17))
-                .map((b) => b.toString(16).padStart(2, "0"))
-                .join("");
-            let configEntry = lookupConfigEntry(clientHash);
-
-            if (configEntry) {
-                activeClientHash = configEntry.userId
-                    .replace(/-/g, "")
-                    .toLowerCase();
-                activeProfile = getAllProfiles().find(
-                    (p) =>
-                        p.id.replace(/-/g, "").toLowerCase() ===
-                        activeClientHash,
-                );
-                if (!activeProfile) return false;
-                if (configEntry.relayIp)
-                    activeProfile = {
-                        ...activeProfile,
-                        proxyIp: configEntry.relayIp,
-                    };
-            } else {
-                let decoded = decodeConfigUuid(clientHash);
-                if (decoded) {
-                    activeProfile = getAllProfiles().find((p) =>
-                        p.id
-                            .replace(/-/g, "")
-                            .toLowerCase()
-                            .startsWith(decoded.userFingerprint),
-                    );
-                    if (activeProfile && decoded.relayIpIndex >= 0) {
-                        const effectivePips = getEffectivePips(activeProfile);
-                        if (effectivePips.length > 0) {
-                            const idx =
-                                decoded.relayIpIndex % effectivePips.length;
-                            activeProfile = {
-                                ...activeProfile,
-                                proxyIp: effectivePips[idx],
-                            };
-                        }
-                    }
-                }
-                if (!activeProfile) {
-                    activeProfile = getAllProfiles().find(
-                        (p) =>
-                            p.id.replace(/-/g, "").toLowerCase() === clientHash,
-                    );
-                }
-                if (!activeProfile) return false;
-                activeClientHash = activeProfile.id
-                    .replace(/-/g, "")
-                    .toLowerCase();
-            }
-            trackUsage(activeClientHash, 0, env, ctx);
-
-            let currentConns = activeConns.get(activeClientHash) || 0;
-            if (activeProfile && activeProfile.connLimit) {
-                if (currentConns >= activeProfile.connLimit) {
-                    webSocket.close();
-                    return isModeAlpha;
-                }
-            }
-            activeConns.set(activeClientHash, currentConns + 1);
-
-            let uTrack = uuidUsage.get(activeClientHash) || {
-                connects: 0,
-                last: 0,
-            };
-            uTrack.connects++;
-            uTrack.last = Date.now();
-            uuidUsage.set(activeClientHash, uTrack);
-
-            const optLen = view[17];
-            const pPos = 18 + optLen + 1;
-            targetPort = new DataView(
-                bufferData.slice(pPos, pPos + 2),
-            ).getUint16(0);
-            const aType = view[pPos + 2];
-            let vPos = pPos + 3,
-                aLen = 0;
-
-            if (aType === 1) {
-                aLen = 4;
-                targetAddr = view.slice(vPos, vPos + aLen).join(".");
-            } else if (aType === 2) {
-                aLen = view[vPos];
-                vPos++;
-                targetAddr = new TextDecoder().decode(
-                    view.slice(vPos, vPos + aLen),
-                );
-            } else if (aType === 3) {
-                aLen = 16;
-                const dv = new DataView(bufferData.slice(vPos, vPos + aLen));
-                targetAddr = Array.from({ length: 8 }, (_, i) =>
-                    dv.getUint16(i * 2).toString(16),
-                ).join(":");
-            }
-            offset = vPos + aLen;
-        } else {
-            let ePos = bufferData.byteLength;
-            for (let i = 0; i < bufferData.byteLength; i++) {
-                if (view[i] === 0x0d && view[i + 1] === 0x0a) {
-                    ePos = i;
-                    break;
-                }
-            }
-
-            let clientHashHex = new TextDecoder().decode(view.slice(0, ePos));
-            let configEntry = lookupConfigEntry(clientHashHex);
-
-            if (configEntry) {
-                activeClientHash = configEntry.userId
-                    .replace(/-/g, "")
-                    .toLowerCase();
-                activeProfile = getAllProfiles().find(
-                    (p) =>
-                        p.id.replace(/-/g, "").toLowerCase() ===
-                        activeClientHash,
-                );
-                if (!activeProfile) return false;
-                if (configEntry.relayIp)
-                    activeProfile = {
-                        ...activeProfile,
-                        proxyIp: configEntry.relayIp,
-                    };
-            } else {
-                activeProfile = getAllProfiles().find(
-                    (p) => getTrojanHash(p.id) === clientHashHex,
-                );
-                if (!activeProfile) return false;
-                activeClientHash = activeProfile.id
-                    .replace(/-/g, "")
-                    .toLowerCase();
-                if (wsRelayIdx >= 0) {
-                    const effectivePips = getEffectivePips(activeProfile);
-                    if (effectivePips.length > 0) {
-                        activeProfile = {
-                            ...activeProfile,
-                            proxyIp:
-                                effectivePips[
-                                    wsRelayIdx % effectivePips.length
-                                ],
-                        };
-                    }
-                }
-            }
-            trackUsage(activeClientHash, 0, env, ctx);
-            let currentConns = activeConns.get(activeClientHash) || 0;
-            if (activeProfile && activeProfile.connLimit) {
-                if (currentConns >= activeProfile.connLimit) {
-                    webSocket.close();
-                    return isModeAlpha;
-                }
-            }
-            activeConns.set(activeClientHash, currentConns + 1);
-            let uTrack = uuidUsage.get(activeClientHash) || {
-                connects: 0,
-                last: 0,
-            };
-            uTrack.connects++;
-            uTrack.last = Date.now();
-            uuidUsage.set(activeClientHash, uTrack);
-
-            let hPos = ePos + 2;
-            hPos++;
-            let aType = view[hPos];
-            hPos++;
-            let aLen = 0;
-
-            if (aType === 1) {
-                aLen = 4;
-                targetAddr = view.slice(hPos, hPos + aLen).join(".");
-            } else if (aType === 3) {
-                aLen = view[hPos];
-                hPos++;
-                targetAddr = new TextDecoder().decode(
-                    view.slice(hPos, hPos + aLen),
-                );
-            } else if (aType === 4) {
-                aLen = 16;
-                const dv = new DataView(bufferData.slice(hPos, hPos + aLen));
-                targetAddr = Array.from({ length: 8 }, (_, i) =>
-                    dv.getUint16(i * 2).toString(16),
-                ).join(":");
-            }
-
-            hPos += aLen;
-            targetPort = new DataView(
-                bufferData.slice(hPos, hPos + 2),
-            ).getUint16(0);
-            offset = hPos + 4;
-        }
-
-        let isDomain =
-            /^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/.test(targetAddr) ||
-            /^[a-zA-Z0-9-]+$/.test(targetAddr);
-        let connectAddr = targetAddr;
-        // AI smart egress classification: explicit domain literal, else TLS
-        // SNI sniff (clients usually send an IP literal in the header).
-        let aiEgress = false;
-        try {
-            if (isDomain) aiEgress = isAiDomain(targetAddr);
-            else if (targetPort === 443 && offset < bufferData.byteLength) {
-                aiEgress = isAiDomain(
-                    sniffSniFromHello(bufferData.slice(offset)),
-                );
-            }
-        } catch (e) {}
-        if (isDomain && sysConfig.customDns) {
-            try {
-                const dohUrl = new URL(sysConfig.customDns);
-                dohUrl.searchParams.set("name", targetAddr);
-                dohUrl.searchParams.set("type", "A");
-                let dnsRes = await fetchT(dohUrl.toString(), {
-                    headers: { accept: "application/dns-json" },
-                });
-                let dnsJson = await dnsRes.json();
-                if (dnsJson.Answer && dnsJson.Answer.length > 0) {
-                    connectAddr = dnsJson.Answer[0].data;
-                }
-            } catch (e) {}
-        }
-
-        try {
-            remoteSocket = connect({ hostname: connectAddr, port: targetPort });
-            await withDeadline(
-                remoteSocket.opened,
-                TCP_OPEN_TIMEOUT_MS,
-                () => closeTcpSocketQuietly(remoteSocket),
-                "direct-open",
-            );
-            activeRelay = null;
-            relayConfirmed = false;
-        } catch {
-            let pips = [];
-            if (activeProfile && activeProfile.proxyIp) {
-                pips = activeProfile.proxyIp
-                    .split(/[\r\n,;]+/)
-                    .map((s) => s.trim())
-                    .filter(Boolean);
-            }
-            if (pips.length === 0 && sysConfig.backupRelay) {
-                pips = sysConfig.backupRelay
-                    .split(/[\r\n,;]+/)
-                    .map((s) => s.trim())
-                    .filter(Boolean);
-            }
-            if (pips.length === 0 && sysConfig.customRelay) {
-                pips = sysConfig.customRelay
-                    .split(/[\r\n,;]+/)
-                    .map((s) => s.trim())
-                    .filter(Boolean);
-            }
-
-            // Consistent hash based on user/profile ID to prevent session/IP splitting across assets on Cloudflare
-            // AI smart egress: AI-flagged relays first, deterministic (no
-            // rotation) so AI exits via clean-country relays. Untouched when
-            // no AI relay is present (distribution exactly as before).
-            let startIndex = 0;
-            let aiPinned = false;
-            try {
-                if (aiEgress) {
-                    const ord = orderAiFirstTokens(pips);
-                    if (ord.moved) {
-                        pips = ord.list;
-                        aiPinned = true;
-                    }
-                }
-            } catch (e) {}
-            if (pips.length > 1 && !aiPinned) {
-                let hash = 0;
-                let hashStr = activeProfile ? activeProfile.id : "";
-                for (let i = 0; i < hashStr.length; i++) {
-                    hash = hashStr.charCodeAt(i) + ((hash << 5) - hash);
-                }
-                startIndex = Math.abs(hash) % pips.length;
-            }
-
-            // Attempt to connect with automatic failover to alternative proxy IPs
-            // (quarantined relays are skipped unless everything is down).
-            // Per-SNI AI quarantine: relays failing only AI traffic are skipped
-            // for AI destinations (never for the rest).
-            let connected = false;
-            let tryPips = filterQuarantinedRelays(pips);
-            try {
-                if (aiEgress && tryPips.length > 1)
-                    tryPips = filterAiQuarantinedTokens(tryPips);
-            } catch (e) {}
-            for (
-                let attempt = 0;
-                attempt < Math.min(tryPips.length, 3);
-                attempt++
-            ) {
-                let currentIndex = (startIndex + attempt) % tryPips.length;
-                let currentProxy = tryPips[currentIndex];
-                const rkFail = relayKeyOf(currentProxy);
-                try {
-                    const [altIP0, altPortStr0] = currentProxy.split(":");
-                    // Strip #Name from the port (Number("8443#X") is NaN) and
-                    // prefer the parsed host (fixes IPv6 + "#Name" tokens).
-                    // Semantics otherwise unchanged (garbage still fails).
-                    const altPortClean = altPortStr0
-                        ? altPortStr0.split("#")[0].trim()
-                        : altPortStr0;
-                    const altIP =
-                        rkFail && rkFail.host ? rkFail.host : altIP0;
-                    remoteSocket = connect({
-                        hostname: altIP,
-                        port: altPortClean ? Number(altPortClean) : targetPort,
-                    });
-                    await withDeadline(
-                        remoteSocket.opened,
-                        TCP_OPEN_TIMEOUT_MS,
-                        () => closeTcpSocketQuietly(remoteSocket),
-                        "relay-open",
-                    );
-                    connected = true;
-                    // No instant success credit: a TCP accept is weak proof
-                    // (a dead relay accepts TCP then hangs). The relay is
-                    // bound to this tunnel generation and confirmed only by
-                    // real downstream bytes in the pipe below.
-                    relayConfirmed = false;
-                    activeRelay = rkFail
-                        ? {
-                              host: rkFail.host,
-                              port: rkFail.port,
-                              ai: aiEgress,
-                          }
-                        : null;
-                    break;
-                } catch (e) {
-                    if (rkFail) {
-                        try {
-                            // AI-only failures feed the AI map so the relay
-                            // stays alive for all other traffic.
-                            if (aiEgress)
-                                recordAiFailure(rkFail.host, rkFail.port);
-                            else recordRelayFailure(rkFail.host, rkFail.port);
-                        } catch (ee) {}
-                    }
-                    // Try next fallback proxy IP in list
-                }
-            }
-            if (!connected) {
-                webSocket.close();
-                return isModeAlpha;
-            }
-        }
-
-        dataWriter = remoteSocket.writable.getWriter();
-        if (offset < bufferData.byteLength) {
-            let chunk = bufferData.slice(offset);
-            // Timed initial write: never hang the handshake path.
-            try {
-                await writeSocketWithTimeout(
-                    remoteSocket,
-                    dataWriter,
-                    chunk,
-                    TCP_WRITE_TIMEOUT_MS,
-                );
-            } catch (e) {
-                closeTcpSocketQuietly(remoteSocket);
-                try {
-                    releaseWriterQuietly(dataWriter);
-                } catch (_) {}
-                dataWriter = null;
-                try {
-                    webSocket.close();
-                } catch (_) {}
-                return isModeAlpha;
-            }
-            try {
-                connBytesUp += chunk.byteLength || 0;
-            } catch (e) {}
-        }
-        // Downstream pipe: the FIRST real bytes on this socket confirm the
-        // bound relay (end-to-end proof). Completion closes the client side
-        // so a dead remote cannot leave a half-open tunnel behind.
-        try {
-            remoteSocket.readable
-                .pipeTo(
-                    new WritableStream({
-                        write(chunk) {
-                            try {
-                                connBytesDown += chunk?.byteLength || 0;
-                                const n =
-                                    (chunk && chunk.byteLength) || 0;
-                                if (
-                                    n > 0 &&
-                                    activeRelay &&
-                                    !relayConfirmed
-                                ) {
-                                    relayConfirmed = true;
-                                    try {
-                                        recordRelaySuccess(
-                                            activeRelay.host,
-                                            activeRelay.port,
-                                            true,
-                                        );
-                                    } catch (e) {}
-                                    try {
-                                        if (activeRelay.ai)
-                                            recordAiSuccess(
-                                                activeRelay.host,
-                                                activeRelay.port,
-                                            );
-                                    } catch (e) {}
-                                }
-                            } catch (e) {}
-                            try {
-                                webSocket.send(chunk);
-                            } catch (e) {}
-                        },
-                        close() {},
-                        abort() {},
-                    }),
-                )
-                .catch(() => {})
-                .finally(() => {
-                    closeTcpSocketQuietly(remoteSocket);
-                    try {
-                        webSocket.close();
-                    } catch (e) {}
-                });
-        } catch (e) {}
-
-        return isModeAlpha;
+    const 浏览器语言20160 = navigator.language || navigator.userLanguage || '';
+    const 已保存语言20159 = localStorage.getItem('preferredLanguage') || 获取凭据20164('preferredLanguage');
+    let 是否值20158 = false;
+    if (已保存语言20159 === 'fa' || 已保存语言20159 === 'fa-IR') {
+      是否值20158 = true;
+    } else {
+      是否值20158 = 浏览器语言20160.includes('fa') || 浏览器语言20160.includes('fa-IR');
     }
-}
-
-function generateHardwareId(seed) {
-    const h20 = Array.from(new TextEncoder().encode(seed))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")
-        .slice(0, 20)
-        .padEnd(20, "0");
-    return `${h20.slice(0, 8)}-0000-4000-8000-${h20.slice(-12)}`;
-}
-
-function getTransportParams(port) {
-    return ["80", "8080", "8880", "2052", "2082", "2086", "2095"].includes(
-        port.toString(),
-    )
-        ? "none"
-        : "tls";
-}
-
-function getSubscriptionStats(targetSub = null) {
-    let name = "Default";
-    let id = activeDeviceId;
-    let limitTotalReq = 0;
-    let expiryMs = 0;
-
-    let hasMultiUser = sysConfig.users && sysConfig.users.length > 0;
-    if (hasMultiUser && targetSub) {
-        let user = sysConfig.users.find(
-            (u) =>
-                u.name.toLowerCase() === targetSub.toLowerCase() ||
-                u.id === targetSub,
-        );
-        if (user) {
-            name = user.name;
-            id = user.id;
-            limitTotalReq = user.limitTotalReq || 0;
-            expiryMs = user.expiryMs || 0;
-        }
-    } else if (!hasMultiUser) {
-        limitTotalReq = sysConfig.limitTotalReq || 0;
-        expiryMs = sysConfig.expiryMs || 0;
-    }
-
-    let idClean = id.replace(/-/g, "").toLowerCase();
-    let sysU = sysUsageCache?.users?.[idClean] || { reqs: 0, dReqs: 0 };
-    let totalBytesUsed = usageTotalBytes(sysU);
-
-    let totalGb = (totalBytesUsed / 1073741824).toFixed(2);
-    let limitTotalGb = limitTotalReq
-        ? (limitReqToBytes(limitTotalReq) / 1073741824).toFixed(2)
-        : "Unlimited";
-
-    let expiryDateTxt = "Never Expire";
-    let remDaysTxt = "Never Expire";
-    if (expiryMs) {
-        let exp = new Date(expiryMs);
-        expiryDateTxt = exp.toISOString().split("T")[0];
-        let remDays = Math.ceil(
-            (expiryMs - Date.now()) / (1000 * 60 * 60 * 24),
-        );
-        remDaysTxt = remDays >= 0 ? `${remDays} Days Left` : "Expired";
-    }
-
-    return {
-        usedStr: `Used: ${totalGb} GB / ${limitTotalGb} GB`,
-        expiryStr: `Expiry: ${expiryDateTxt} (${remDaysTxt})`,
+    const 本地值20157 = {
+      zh: {
+        workerRegion: 'Worker地区: ',
+        detectionMethod: '检测方式: ',
+        proxyIPStatus: '${解码64('UHJveHlJUOeKtuaAgTog')}',
+        currentIP: '当前使用IP: ',
+        regionMatch: '地区匹配: ',
+        detectionFailed: '检测失败'
+      },
+      fa: {
+        workerRegion: 'منطقه Worker: ',
+        detectionMethod: 'روش تشخیص: ',
+        proxyIPStatus: '${解码64('2YjYtti524zYqiBQcm94eUlQOiA=')}',
+        currentIP: 'IP فعلی: ',
+        regionMatch: 'تطبیق منطقه: ',
+        detectionFailed: 'تشخیص ناموفق'
+      }
     };
+    const 翻译值20156 = 本地值20157[是否值20158 ? 'fa' : 'zh'];
+    document.getElementById('regionStatus').innerHTML = 翻译值20156.workerRegion + '<span style="color: #ff3860;">❌ ' + 翻译值20156.detectionFailed + '</span>';
+    document.getElementById('geoInfo').innerHTML = 翻译值20156.detectionMethod + '<span style="color: #ff3860;">❌ ' + 翻译值20156.detectionFailed + '</span>';
+    document.getElementById('backupStatus').innerHTML = 翻译值20156.proxyIPStatus + '<span style="color: #ff3860;">❌ ' + 翻译值20156.detectionFailed + '</span>';
+    document.getElementById('currentIP').innerHTML = 翻译值20156.currentIP + '<span style="color: #ff3860;">❌ ' + 翻译值20156.detectionFailed + '</span>';
+    document.getElementById('regionMatch').innerHTML = 翻译值20156.regionMatch + '<span style="color: #ff3860;">❌ ' + 翻译值20156.detectionFailed + '</span>';
+  }
 }
-
-function getFakeConfigNames(targetSub = null) {
-    let stats = getSubscriptionStats(targetSub);
-    let configs = sysConfig.fakeConfigs || [
-        { name: "📊 {usage}", enabled: true },
-        { name: "📅 {expiry}", enabled: true },
-    ];
-    return configs
-        .filter((f) => f && f.enabled && f.name)
-        .map((f) => {
-            return f.name
-                .replace(/\{usage\}/g, stats.usedStr)
-                .replace(/\{expiry\}/g, stats.expiryStr);
-        });
-}
-
-function getCleanIps(hostName, userCleanIps = null) {
-    let rawIps = userCleanIps || sysConfig.cleanIps;
-    let ips = rawIps
-        ? rawIps
-              .split(/[\r\n,;]+/)
-              .map((s) => {
-                  let t = s.trim();
-                  return t ? t.split("#")[0].trim() : "";
-              })
-              .filter(Boolean)
-        : [];
-    if (ips.length === 0)
-        ips = [
-            hostName.endsWith(".pages.dev") ? sysConfig.metricNode : hostName,
-        ];
-    return ips;
-}
-
-function getCleanIpsWithNames(hostName, userCleanIps = null) {
-    let rawIps = userCleanIps || sysConfig.cleanIps;
-    let entries = rawIps
-        ? rawIps
-              .split(/[\r\n,;]+/)
-              .map((s) => {
-                  let t = s.trim();
-                  if (!t) return null;
-                  let parts = t.split("#");
-                  let ip = parts[0].trim();
-                  let name = (parts[1] || "").trim();
-                  return ip ? { ip, name } : null;
-              })
-              .filter(Boolean)
-        : [];
-    if (entries.length === 0)
-        entries = [
-            {
-                ip: hostName.endsWith(".pages.dev")
-                    ? sysConfig.metricNode
-                    : hostName,
-                name: "",
-            },
-        ];
-    return entries;
-}
-
-function getAllProfiles(targetSub = null) {
-    let list = [{ id: activeDeviceId, name: "Default" }];
-
-    if (sysConfig.users && sysConfig.users.length > 0) {
-        let now = Date.now();
-        sysConfig.users.forEach((u) => {
-            let skip = false;
-            if (u.expiryMs && now > u.expiryMs) skip = true;
-            if (u.isPaused) skip = true;
-            if (
-                u.limitTotalReq &&
-                sysUsageCache &&
-                sysUsageCache.users &&
-                sysUsageCache.users[u.id.replace(/-/g, "").toLowerCase()]
-            ) {
-                if (
-                    sysUsageCache.users[u.id.replace(/-/g, "").toLowerCase()]
-                        .reqs >= u.limitTotalReq
-                )
-                    skip = true;
-            }
-            if (
-                u.limitDailyReq &&
-                sysUsageCache &&
-                sysUsageCache.users &&
-                sysUsageCache.users[u.id.replace(/-/g, "").toLowerCase()]
-            ) {
-                let usr =
-                    sysUsageCache.users[u.id.replace(/-/g, "").toLowerCase()];
-                if (
-                    usr.lastDay === new Date().toISOString().split("T")[0] &&
-                    usr.dReqs >= u.limitDailyReq
-                )
-                    skip = true;
-            }
-            if (!skip) {
-                list.push({
-                    id: u.id,
-                    name: u.name,
-                    proxyIp: u.proxyIp,
-                    cleanIp: u.cleanIp || null,
-                    userMode: u.userMode || null,
-                    userPorts: u.userPorts || null,
-                    maxConfigs: u.maxConfigs || null,
-                    proxyIpGeo: u.proxyIpGeo || null,
-                    userNodes: u.userNodes || null,
-                    nat64: u.nat64 || null,
-                    connLimit: u.connLimit || null,
-                    userPanelUrl: u.userPanelUrl || null,
-                });
-                registerConfigEntry(u.id, u.id, u.proxyIp || "");
-            }
-        });
+async function 测试接口() {
+  try {
+    function 获取凭据20155(名称20154) {
+      const 值20153 = '; ' + document.cookie;
+      const 部分列表20152 = 值20153.split('; ' + 名称20154 + '=');
+      if (部分列表20152.length === 2) return 部分列表20152.pop().split(';').shift();
+      return null;
     }
-
-    if (targetSub) {
-        list = list.filter(
-            (p) => p.name.toLowerCase() === targetSub.toLowerCase() || p.id === targetSub,
-        );
+    const 浏览器语言20151 = navigator.language || navigator.userLanguage || '';
+    const 已保存语言20150 = localStorage.getItem('preferredLanguage') || 获取凭据20155('preferredLanguage');
+    let 是否值20149 = false;
+    if (已保存语言20150 === 'fa' || 已保存语言20150 === 'fa-IR') {
+      是否值20149 = true;
+    } else {
+      是否值20149 = 浏览器语言20151.includes('fa') || 浏览器语言20151.includes('fa-IR');
     }
-    return list;
-}
-
-// Returns the hostname of a linked panel URL (strips scheme/path/port). The
-// linkedPanels API system (cross-panel sync) is untouched; here we only read
-// its URLs as extra parallel node hosts, restoring 2.6 "parallel node" behavior.
-function linkedPanelHost(p) {
-    let raw = p && typeof p === "object" ? p.url || "" : p || "";
-    raw = String(raw).trim();
-    if (!raw) return "";
-    raw = raw.replace(/^[a-zA-Z]+:\/\//, ""); // drop scheme
-    raw = raw.split("/")[0]; // drop path
-    raw = raw.split("@").pop(); // drop credentials
-    if (raw.startsWith("[")) {
-        // [ipv6]:port
-        return raw.slice(0, raw.indexOf("]") + 1);
+    const 本地值20148 = {
+      zh: {
+        apiTestResult: 'API检测结果: ',
+        apiTestTime: '检测时间: ',
+        apiTestFailed: 'API检测失败: ',
+        unknownError: '未知错误',
+        apiTestError: 'API测试失败: '
+      },
+      fa: {
+        apiTestResult: 'نتیجه تشخیص API: ',
+        apiTestTime: 'زمان تشخیص: ',
+        apiTestFailed: 'تشخیص API ناموفق: ',
+        unknownError: 'خطای ناشناخته',
+        apiTestError: 'تست API ناموفق: '
+      }
+    };
+    const 翻译值20147 = 本地值20148[是否值20149 ? 'fa' : 'zh'];
+    const 响应20146 = await fetch(window.location.pathname + '/test-api');
+    const 数据20145 = await 响应20146.json();
+    if (数据20145.detectedRegion) {
+      显示提示(翻译值20147.apiTestResult + 数据20145.detectedRegion + '\\n' + 翻译值20147.apiTestTime + 数据20145.timestamp, 'info', {
+        duration: 5000
+      });
+    } else {
+      显示提示(翻译值20147.apiTestFailed + (数据20145.error || 翻译值20147.unknownError), 'error', {
+        duration: 4500
+      });
     }
-    return raw.split(":")[0]; // drop port
+  } catch (错误20144) {
+    function 获取凭据20143(名称20142) {
+      const 值20141 = '; ' + document.cookie;
+      const 部分列表20140 = 值20141.split('; ' + 名称20142 + '=');
+      if (部分列表20140.length === 2) return 部分列表20140.pop().split(';').shift();
+      return null;
+    }
+    const 浏览器语言20139 = navigator.language || navigator.userLanguage || '';
+    const 已保存语言20138 = localStorage.getItem('preferredLanguage') || 获取凭据20143('preferredLanguage');
+    let 是否值20137 = false;
+    if (已保存语言20138 === 'fa' || 已保存语言20138 === 'fa-IR') {
+      是否值20137 = true;
+    } else {
+      是否值20137 = 浏览器语言20139.includes('fa') || 浏览器语言20139.includes('fa-IR');
+    }
+    const 本地值20136 = {
+      zh: {
+        apiTestError: 'API测试失败: '
+      },
+      fa: {
+        apiTestError: 'تست API ناموفق: '
+      }
+    };
+    const 翻译值20135 = 本地值20136[是否值20137 ? 'fa' : 'zh'];
+    显示提示(翻译值20135.apiTestError + 错误20144.message, 'error', {
+      duration: 4500
+    });
+  }
 }
 
-// Combined parallel-node host list = slaveNodes (legacy) + linkedPanels URLs (2.9 API).
-function getGlobalNodeHosts() {
-    let hosts = [];
-    if (sysConfig.slaveNodes)
-        hosts.push(
-            ...sysConfig.slaveNodes
-                .split(/[\r\n,;]+/)
-                .map((s) => s.trim())
-                .filter(Boolean),
-        );
-    if (Array.isArray(sysConfig.linkedPanels))
-        hosts.push(
-            ...sysConfig.linkedPanels.map(linkedPanelHost).filter(Boolean),
-        );
-    return [...new Set(hosts)];
+// 配置管理相关函数
+async function 检查键值状态() {
+  const 接口网址20134 = window.location.pathname + '/api/config';
+  try {
+    const 响应20133 = await fetch(接口网址20134);
+    function 获取凭据20132(名称20131) {
+      const 值20130 = '; ' + document.cookie;
+      const 部分列表20129 = 值20130.split('; ' + 名称20131 + '=');
+      if (部分列表20129.length === 2) return 部分列表20129.pop().split(';').shift();
+      return null;
+    }
+    const 浏览器语言20128 = navigator.language || navigator.userLanguage || '';
+    const 已保存语言20127 = localStorage.getItem('preferredLanguage') || 获取凭据20132('preferredLanguage');
+    let 是否值20126 = false;
+    if (已保存语言20127 === 'fa' || 已保存语言20127 === 'fa-IR') {
+      是否值20126 = true;
+    } else {
+      是否值20126 = 浏览器语言20128.includes('fa') || 浏览器语言20128.includes('fa-IR');
+    }
+    const 本地值20125 = {
+      zh: {
+        kvDisabled: '⚠️ KV存储未启用或未配置',
+        kvNotConfigured: 'KV存储未配置，无法使用配置管理功能。\\n\\n请在Cloudflare Workers中:\\n1. 创建KV命名空间\\n2. 绑定环境变量 C\\n3. 重新部署代码',
+        kvNotEnabled: 'KV存储未配置',
+        kvEnabled: '✅ KV存储已启用，可以使用配置管理功能',
+        kvCheckFailed: '⚠️ KV存储检测失败',
+        kvCheckFailedFormat: 'KV存储检测失败: 响应格式错误',
+        kvCheckFailedStatus: 'KV存储检测失败 - 状态码: ',
+        kvCheckFailedError: 'KV存储检测失败 - 错误: '
+      },
+      fa: {
+        kvDisabled: '⚠️ ذخیره‌سازی KV فعال نیست یا پیکربندی نشده است',
+        kvNotConfigured: 'ذخیره‌سازی KV پیکربندی نشده است، نمی‌توانید از عملکرد مدیریت تنظیمات استفاده کنید.\\n\\nلطفا در Cloudflare Workers:\\n1. فضای نام KV ایجاد کنید\\n2. متغیر محیطی C را پیوند دهید\\n3. کد را دوباره مستقر کنید',
+        kvNotEnabled: 'ذخیره‌سازی KV پیکربندی نشده است',
+        kvEnabled: '✅ ذخیره‌سازی KV فعال است، می‌توانید از مدیریت تنظیمات استفاده کنید',
+        kvCheckFailed: '⚠️ بررسی ذخیره‌سازی KV ناموفق',
+        kvCheckFailedFormat: 'بررسی ذخیره‌سازی KV ناموفق: خطای فرمت پاسخ',
+        kvCheckFailedStatus: 'بررسی ذخیره‌سازی KV ناموفق - کد وضعیت: ',
+        kvCheckFailedError: 'بررسی ذخیره‌سازی KV ناموفق - خطا: '
+      }
+    };
+    const 翻译值20124 = 本地值20125[是否值20126 ? 'fa' : 'zh'];
+    if (响应20133.status === 503) {
+      // KV未配置
+      document.getElementById('kvStatus').innerHTML = '<span style="color: #ffb400;">' + 翻译值20124.kvDisabled + '</span>';
+      document.getElementById('configCard').style.display = 'block';
+      document.getElementById('currentConfig').textContent = 翻译值20124.kvNotConfigured;
+    } else if (响应20133.ok) {
+      try {
+        const 数据20123 = await 响应20133.json();
+
+        // 检查响应是否包含KV配置信息
+        if (数据20123 && 数据20123.kvEnabled === true) {
+          document.getElementById('kvStatus').innerHTML = '<span style="color: #00ff9d;">' + 翻译值20124.kvEnabled + '</span>';
+          document.getElementById('configContent').style.display = 'block';
+          document.getElementById('configCard').style.display = 'block';
+          await 加载当前配置();
+        } else {
+          document.getElementById('kvStatus').innerHTML = '<span style="color: #ffb400;">' + 翻译值20124.kvDisabled + '</span>';
+          document.getElementById('configCard').style.display = 'block';
+          document.getElementById('currentConfig').textContent = 翻译值20124.kvNotEnabled;
+        }
+      } catch (数据对象错误) {
+        document.getElementById('kvStatus').innerHTML = '<span style="color: #ffb400;">' + 翻译值20124.kvCheckFailed + '</span>';
+        document.getElementById('configCard').style.display = 'block';
+        document.getElementById('currentConfig').textContent = 翻译值20124.kvCheckFailedFormat;
+      }
+    } else {
+      document.getElementById('kvStatus').innerHTML = '<span style="color: #ffb400;">' + 翻译值20124.kvDisabled + '</span>';
+      document.getElementById('configCard').style.display = 'block';
+      document.getElementById('currentConfig').textContent = 翻译值20124.kvCheckFailedStatus + 响应20133.status;
+    }
+  } catch (错误20122) {
+    function 获取凭据(名称) {
+      const 值20121 = '; ' + document.cookie;
+      const 部分列表20120 = 值20121.split('; ' + 名称 + '=');
+      if (部分列表20120.length === 2) return 部分列表20120.pop().split(';').shift();
+      return null;
+    }
+    const 浏览器语言 = navigator.language || navigator.userLanguage || '';
+    const 已保存语言 = localStorage.getItem('preferredLanguage') || 获取凭据('preferredLanguage');
+    let 是否值 = false;
+    if (已保存语言 === 'fa' || 已保存语言 === 'fa-IR') {
+      是否值 = true;
+    } else {
+      是否值 = 浏览器语言.includes('fa') || 浏览器语言.includes('fa-IR');
+    }
+    const 本地值20119 = {
+      zh: {
+        kvDisabled: '⚠️ KV存储未启用或未配置',
+        kvCheckFailedError: 'KV存储检测失败 - 错误: '
+      },
+      fa: {
+        kvDisabled: '⚠️ ذخیره‌سازی KV فعال نیست یا پیکربندی نشده است',
+        kvCheckFailedError: 'بررسی ذخیره‌سازی KV ناموفق - خطا: '
+      }
+    };
+    const 翻译值20118 = 本地值20119[是否值 ? 'fa' : 'zh'];
+    document.getElementById('kvStatus').innerHTML = '<span style="color: #ffb400;">' + 翻译值20118.kvDisabled + '</span>';
+    document.getElementById('configCard').style.display = 'block';
+    document.getElementById('currentConfig').textContent = 翻译值20118.kvCheckFailedError + 错误20122.message;
+  }
+}
+function 读取字段值(标识) {
+  const 元素 = document.getElementById(标识);
+  return 元素 ? 元素.value : '';
 }
 
-function getProxyIpsArray(proxyIpString) {
-    if (!proxyIpString) return [];
-    return proxyIpString
-        .split(/[\r\n,;]+/)
-        .map((s) => {
-            let trimmed = s.trim();
-            if (!trimmed) return "";
-            let hostPort = trimmed.split("#")[0].split("@")[0];
-            if (hostPort.includes(":") && !hostPort.includes("]")) {
-                return hostPort.split(":")[0];
-            } else if (hostPort.startsWith("[") && hostPort.includes("]")) {
-                return hostPort.split("]")[0].replace("[", "");
-            }
-            return hostPort;
+function 写入字段值(标识, 值 = '') {
+  const 元素 = document.getElementById(标识);
+  if (元素) 元素.value = 值 || '';
+}
+
+function 是否开关启用(值, 默认启用 = false) {
+  if (值 === undefined || 值 === null || 值 === '') return 默认启用;
+  if (值 === true || 值 === false) return 值;
+  const 文本 = String(值).trim().toLowerCase();
+  if (文本 === 'yes' || 文本 === 'true' || 文本 === '1' || 文本 === 'on') return true;
+  if (文本 === 'no' || 文本 === 'false' || 文本 === '0' || 文本 === 'off') return false;
+  return 默认启用;
+}
+
+function 写入开关值(标识, 值, 默认启用 = false) {
+  const 元素 = document.getElementById(标识);
+  if (元素) 元素.checked = 是否开关启用(值, 默认启用);
+}
+
+function 读取开关值(标识, 默认启用 = false) {
+  const 元素 = document.getElementById(标识);
+  if (!元素) return 默认启用 ? 'yes' : 'no';
+  return 元素.checked ? 'yes' : 'no';
+}
+
+function 同步协议界面状态() {
+  const 明文开关 = document.getElementById('ev');
+  const 木马开关 = document.getElementById('et');
+  const 扩展开关 = document.getElementById('ex');
+  if (明文开关 && 木马开关 && 扩展开关 && !明文开关.checked && !木马开关.checked && !扩展开关.checked) {
+    明文开关.checked = true;
+  }
+}
+
+function 同步联动界面状态() {
+  同步协议界面状态();
+  const 加密客户端问候复选框 = document.getElementById('ech');
+  const 端口控制 = document.getElementById('portControl');
+  if (加密客户端问候复选框 && 端口控制 && 加密客户端问候复选框.checked) {
+    端口控制.value = 'yes';
+  }
+  更新路径类型状态(读取字段值('customPath'));
+  更新工作器地区状态();
+}
+
+function 应用配置到界面(配置) {
+  写入字段值('wkRegion', 配置.wk);
+  写入开关值('ev', 配置.ev, true);
+  写入开关值('et', 配置.et, false);
+  写入开关值('ex', 配置.ex, false);
+  写入开关值('ech', 配置.ech, false);
+  写入字段值('tp', 配置.tp);
+  写入字段值('customDNS', 配置.customDNS);
+  写入字段值('customECHDomain', 配置.customECHDomain);
+  写入字段值('alpn', 配置.alpn);
+  写入字段值('scu', 配置.scu);
+  写入开关值('ena', 配置.ena, false);
+  写入开关值('jk', 配置.jk, false);
+  const 家宽按钮 = document.getElementById('jkClientBtn');
+  if (家宽按钮) 家宽按钮.style.display = 是否开关启用(配置.jk, false) ? '' : 'none';
+  写入开关值('epd', 配置.epd, true);
+  写入开关值('epi', 配置.epi, true);
+  写入开关值('egi', 配置.egi, true);
+  写入开关值('ipv4Enabled', 配置.ipv4, true);
+  写入开关值('ipv6Enabled', 配置.ipv6, true);
+  写入开关值('ispMobile', 配置.ispMobile, true);
+  写入开关值('ispUnicom', 配置.ispUnicom, true);
+  写入开关值('ispTelecom', 配置.ispTelecom, true);
+  写入字段值('customPath', 配置.d);
+  写入字段值('customIP', 配置.p);
+  写入字段值('yx', 配置.yx);
+  写入字段值('yxURL', 配置.yxURL);
+  写入字段值('socksConfig', 配置.s);
+  写入字段值('customHomepage', 配置.homepage);
+  写入字段值('apiEnabled', 配置.ae);
+  写入字段值('regionMatching', 配置.rm);
+  写入字段值('downgradeControl', 配置.qj);
+  写入字段值('portControl', 配置.dkby);
+  写入字段值('preferredControl', 配置.yxby);
+  同步联动界面状态();
+}
+
+function 收集界面配置() {
+  const 配置 = {
+    wk: 读取字段值('wkRegion'),
+    ev: 读取开关值('ev', true),
+    et: 读取开关值('et', false),
+    ex: 读取开关值('ex', false),
+    ech: 读取开关值('ech', false),
+    tp: 读取字段值('tp'),
+    customDNS: 读取字段值('customDNS'),
+    customECHDomain: 读取字段值('customECHDomain'),
+    alpn: 读取字段值('alpn'),
+    d: 读取字段值('customPath'),
+    p: 读取字段值('customIP'),
+    yx: 读取字段值('yx'),
+    yxURL: 读取字段值('yxURL'),
+    s: 读取字段值('socksConfig'),
+    homepage: 读取字段值('customHomepage'),
+    scu: 读取字段值('scu'),
+    ena: 读取开关值('ena', false),
+    jk: 读取开关值('jk', false),
+    epd: 读取开关值('epd', true),
+    epi: 读取开关值('epi', true),
+    egi: 读取开关值('egi', true),
+    ae: 读取字段值('apiEnabled'),
+    rm: 读取字段值('regionMatching'),
+    qj: 读取字段值('downgradeControl'),
+    dkby: 读取字段值('portControl'),
+    yxby: 读取字段值('preferredControl'),
+    ipv4: 读取开关值('ipv4Enabled', true),
+    ipv6: 读取开关值('ipv6Enabled', true),
+    ispMobile: 读取开关值('ispMobile', true),
+    ispUnicom: 读取开关值('ispUnicom', true),
+    ispTelecom: 读取开关值('ispTelecom', true)
+  };
+  if (配置.ev === 'no' && 配置.et === 'no' && 配置.ex === 'no') {
+    配置.ev = 'yes';
+    写入开关值('ev', 'yes', true);
+  }
+  if (配置.ech === 'yes') {
+    配置.dkby = 'yes';
+    写入字段值('portControl', 'yes');
+  }
+  return 配置;
+}
+
+async function 加载当前配置() {
+  const 接口网址20117 = window.location.pathname + '/api/config';
+  try {
+    const 响应20116 = await fetch(接口网址20117);
+    if (响应20116.status === 503) {
+      document.getElementById('currentConfig').textContent = 'KV存储未配置，无法加载配置';
+      return;
+    }
+    if (!响应20116.ok) {
+      const 错误文本20115 = await 响应20116.text();
+      document.getElementById('currentConfig').textContent = '加载配置失败: ' + 错误文本20115;
+      return;
+    }
+    const 配置 = await 响应20116.json();
+
+    // 过滤掉内部字段 kvEnabled
+    const 显示配置 = {};
+    for (const [键20114, 值20113] of Object.entries(配置)) {
+      if (键20114 !== 'kvEnabled') {
+        显示配置[键20114] = 值20113;
+      }
+    }
+    let 配置文本 = '当前配置:\\n';
+    if (Object.keys(显示配置).length === 0) {
+      配置文本 += '(暂无配置)';
+    } else {
+      for (const [键, 值20112] of Object.entries(显示配置)) {
+        配置文本 += 键 + ': ' + (值20112 || '(未设置)') + '\\n';
+      }
+    }
+    document.getElementById('currentConfig').textContent = 配置文本;
+
+    应用配置到界面(配置);
+  } catch (错误20111) {
+    document.getElementById('currentConfig').textContent = '加载配置失败: ' + 错误20111.message;
+  }
+}
+
+// 更新路径类型显示
+function 更新路径类型状态(自定义路径) {
+  const 路径类型状态 = document.getElementById('pathTypeStatus');
+  const 当前网址20110 = window.location.href;
+  const 路径部分列表 = window.location.pathname.split('/').filter(参数值20109 => 参数值20109);
+  const 当前路径 = 路径部分列表.length > 0 ? 路径部分列表[0] : '';
+  if (自定义路径 && 自定义路径.trim()) {
+    // 使用自定义路径 (d)
+    路径类型状态.innerHTML = '<div style="color: #00ff9d;">使用类型: <strong>自定义路径 (d)</strong></div>' + '<div style="margin-top: 5px; color: #00f0ff;">当前路径: <span style="color: #ffb400;">' + 自定义路径 + '</span></div>' + '<div style="margin-top: 5px; font-size: 0.9rem; color: #7aa9c4;">访问地址: ' + (当前网址20110.split('/')[0] + '//' + 当前网址20110.split('/')[2]) + 自定义路径 + '/sub</div>';
+  } else {
+    // 使用 UUID (u)
+    路径类型状态.innerHTML = '<div style="color: #00ff9d;">使用类型: <strong>UUID 路径 (u)</strong></div>' + '<div style="margin-top: 5px; color: #00f0ff;">当前路径: <span style="color: #ffb400;">' + (当前路径 || '(UUID)') + '</span></div>' + '<div style="margin-top: 5px; font-size: 0.9rem; color: #7aa9c4;">访问地址: ' + 当前网址20110.split('/sub')[0] + '/sub</div>';
+  }
+}
+
+// 更新wk地区选择的启用/禁用状态
+function 更新工作器地区状态() {
+  const 自定义地址输入20108 = document.getElementById('customIP');
+  const 值地区 = document.getElementById('wkRegion');
+  const 值地区值 = document.getElementById('wkRegionHint');
+  if (自定义地址输入20108 && 值地区) {
+    const 是否有自定义地址 = 自定义地址输入20108.value.trim() !== '';
+    值地区.disabled = 是否有自定义地址;
+
+    // 添加视觉反馈
+    if (是否有自定义地址) {
+      值地区.style.opacity = '0.5';
+      值地区.style.cursor = 'not-allowed';
+      值地区.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+      // 显示提示信息
+      if (值地区值) {
+        值地区值.style.display = 'block';
+        值地区值.style.color = '#ffb400';
+      }
+    } else {
+      值地区.style.opacity = '1';
+      值地区.style.cursor = 'pointer';
+      值地区.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+      // 隐藏提示信息
+      if (值地区值) {
+        值地区值.style.display = 'none';
+      }
+    }
+  }
+}
+async function 保存配置(配置数据20107) {
+  const 接口网址 = window.location.pathname + '/api/config';
+  try {
+    const 响应20106 = await fetch(接口网址, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(配置数据20107)
+    });
+    if (响应20106.status === 503) {
+      显示状态('KV存储未配置，无法保存配置。请先在Cloudflare Workers中配置KV存储。', 'error');
+      return;
+    }
+    if (!响应20106.ok) {
+      const 错误文本20105 = await 响应20106.text();
+
+      // 尝试解析 JSON 错误信息
+      try {
+        const 错误数据20104 = JSON.parse(错误文本20105);
+        显示状态(错误数据20104.message || '保存失败', 'error');
+      } catch (解析错误20103) {
+        // 如果不是 JSON，直接显示文本
+        显示状态('保存失败: ' + 错误文本20105, 'error');
+      }
+      return;
+    }
+    const 结果20102 = await 响应20106.json();
+    显示状态(结果20102.message, 结果20102.success ? 'success' : 'error');
+    if (结果20102.success) {
+      await 加载当前配置();
+      // 更新wk地区选择状态
+      更新工作器地区状态();
+      // 保存成功后刷新页面以更新系统状态
+      setTimeout(function () {
+        window.location.reload();
+      }, 1500);
+    } else {}
+  } catch (错误20101) {
+    显示状态('保存失败: ' + 错误20101.message, 'error');
+  }
+}
+function 显示状态(消息20100, 类型20099) {
+  const 状态值 = document.getElementById('statusMessage');
+  if (状态值) {
+    状态值.textContent = 消息20100;
+    状态值.style.display = 'block';
+    状态值.style.color = 类型20099 === 'success' ? '#00f0ff' : '#ff3860';
+    状态值.style.borderColor = 类型20099 === 'success' ? '#00f0ff' : '#ff3860';
+    setTimeout(function () {
+      状态值.style.display = 'none';
+    }, 3000);
+  }
+  // 同步在底部操作条上方弹出霓虹反馈
+  if (typeof window.显示操作状态 === 'function') {
+    window.显示操作状态(消息20100, 类型20099 === 'success' ? 'ok' : 'err');
+  }
+}
+async function 重置全部配置() {
+  if (confirm('确定要重置所有配置吗？这将清空所有KV配置，恢复为环境变量设置。')) {
+    try {
+      const 响应20098 = await fetch(window.location.pathname + '/api/config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          wk: '',
+          d: '',
+          p: '',
+          yx: '',
+          yxURL: '',
+          s: '',
+          ae: '',
+          rm: '',
+          qj: '',
+          dkby: '',
+          yxby: '',
+          ev: '',
+          et: '',
+          ex: '',
+          ech: '',
+          tp: '',
+          customDNS: '',
+          customECHDomain: '',
+          scu: '',
+          epd: '',
+          epi: '',
+          egi: '',
+          ipv4: '',
+          ipv6: '',
+          ispMobile: '',
+          ispUnicom: '',
+          ispTelecom: '',
+          homepage: '',
+          alpn: ''
         })
-        .filter(Boolean);
-}
+      });
+      if (响应20098.status === 503) {
+        显示状态('KV存储未配置，无法重置配置。', 'error');
+        return;
+      }
+      if (!响应20098.ok) {
+        const 错误文本 = await 响应20098.text();
 
-function ipv4ToNat64(ipv4, prefix) {
-    if (!prefix || !ipv4) return null;
-    let parts = ipv4.split(".");
-    if (parts.length !== 4 || parts.some((p) => isNaN(parseInt(p))))
-        return null;
-    let hex = parts
-        .map((p) => parseInt(p).toString(16).padStart(2, "0"))
-        .join("");
-    let suffix = hex.match(/.{1,4}/g).join(":");
-    return prefix.replace(/\/\d+$/, "").replace(/:$/, "") + "::" + suffix;
-}
-
-function getProxyIpsWithNat64(proxyIpString, nat64Prefix) {
-    let ips = getProxyIpsArray(proxyIpString);
-    if (nat64Prefix) {
-        let prefixes = nat64Prefix
-            .split(/[\r\n,;]+/)
-            .map((s) => s.trim())
-            .filter(Boolean);
-        let nat64Ips = [];
-        prefixes.forEach((prefix) => {
-            ips.forEach((ip) => {
-                if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
-                    let nat64 = ipv4ToNat64(ip, prefix);
-                    if (nat64) nat64Ips.push(nat64);
-                }
-            });
-        });
-        ips = ips.concat(nat64Ips);
+        // 尝试解析 JSON 错误信息
+        try {
+          const 错误数据 = JSON.parse(错误文本);
+          显示状态(错误数据.message || '重置失败', 'error');
+        } catch (解析错误) {
+          // 如果不是 JSON，直接显示文本
+          显示状态('重置失败: ' + 错误文本, 'error');
+        }
+        return;
+      }
+      const 结果20097 = await 响应20098.json();
+      显示状态(结果20097.message || '配置已重置', 结果20097.success ? 'success' : 'error');
+      if (结果20097.success) {
+        await 加载当前配置();
+        // 更新wk地区选择状态
+        更新工作器地区状态();
+        // 刷新页面以更新系统状态
+        setTimeout(function () {
+          window.location.reload();
+        }, 1500);
+      }
+    } catch (错误20096) {
+      显示状态('重置失败: ' + 错误20096.message, 'error');
     }
-    return ips;
+  }
 }
+async function 检查加密问候状态() {
+  const 加密客户端问候状态值 = document.getElementById('echStatus');
+  if (!加密客户端问候状态值) return;
+  try {
+    const 当前网址 = window.location.href;
+    const 订阅网址 = 当前网址 + '/sub';
+    加密客户端问候状态值.innerHTML = 'ECH状态: <span style="color: #ffb400;">检测中...</span>';
+    const 响应20095 = await fetch(订阅网址, {
+      method: 'GET',
+      headers: {
+        'Accept': 'text/plain'
+      }
+    });
+    const 加密客户端问候状态头部 = 响应20095.headers.get('X-ECH-Status');
+    const 加密客户端问候配置长度 = 响应20095.headers.get('X-ECH-Config-Length');
+    if (加密客户端问候状态头部 === 'ENABLED') {
+      加密客户端问候状态值.innerHTML = 'ECH状态: <span style="color: #00ff9d;">✅ 已启用' + (加密客户端问候配置长度 ? ' (配置长度: ' + 加密客户端问候配置长度 + ')' : '') + '</span>';
+    } else {
+      加密客户端问候状态值.innerHTML = 'ECH状态: <span style="color: #ffb400;">⚠️ 未启用</span>';
+    }
+  } catch (错误20094) {
+    加密客户端问候状态值.innerHTML = 'ECH状态: <span style="color: #ff3860;">❌ 检测失败: ' + 错误20094.message + '</span>';
+  }
+}
+document.addEventListener('DOMContentLoaded', function () {
+  创建矩阵雨();
+  检查系统状态();
+  检查键值状态();
+  检查加密问候状态();
 
-const VALID_NAME_TAGS = [
-    "FLAG",
-    "COUNTRY",
-    "CITY",
-    "ISP",
-    "PROTOCOL",
-    "USER",
-    "PORT",
-    "PREFIX",
-    "IP",
-    "IP_NAME",
-    "HOST",
-    "DATE",
-    "INDEX",
-    "WORKER",
+  // ECH 开启时自动联动开启仅TLS
+  const 加密客户端问候复选框 = document.getElementById('ech');
+  const 端口控制 = document.getElementById('portControl');
+  if (加密客户端问候复选框 && 端口控制) {
+    加密客户端问候复选框.addEventListener('change', function () {
+      if (this.checked) {
+        // ECH 开启时，自动设置仅TLS为 yes
+        端口控制.value = 'yes';
+      }
+      同步联动界面状态();
+    });
+
+    // 页面加载时，如果 ECH 已勾选，也自动设置仅TLS
+    if (加密客户端问候复选框.checked) {
+      端口控制.value = 'yes';
+    }
+  }
+
+  // 监听customIP输入框变化，实时更新wk地区选择状态
+  const 自定义地址输入 = document.getElementById('customIP');
+  if (自定义地址输入) {
+    自定义地址输入.addEventListener('input', function () {
+      同步联动界面状态();
+    });
+  }
+
+
+  const 自定义路径输入 = document.getElementById('customPath');
+  if (自定义路径输入) {
+    自定义路径输入.addEventListener('input', function () {
+      同步联动界面状态();
+    });
+  }
+
+  ['ev', 'et', 'ex'].forEach(function (协议标识) {
+    const 协议开关 = document.getElementById(协议标识);
+    if (协议开关) {
+      协议开关.addEventListener('change', function () {
+        同步联动界面状态();
+      });
+    }
+  });
+
+  // 阻止表单默认提交（保存按钮已统一到底部操作条）
+  ['regionForm', 'otherConfigForm', 'advancedConfigForm'].forEach(function (本地值20093) {
+    const 表单值 = document.getElementById(本地值20093);
+    if (表单值) 表单值.addEventListener('submit', function (事件值20092) {
+      事件值20092.preventDefault();
+    });
+  });
+
+  // 在任意输入框按下回车，触发统一保存
+  document.querySelectorAll('#configContent input[type="text"], #configContent input[type="number"]').forEach(function (本地值20091) {
+    本地值20091.addEventListener('keydown', function (事件值20090) {
+      if (事件值20090.key === 'Enter') {
+        事件值20090.preventDefault();
+        保存全部配置();
+      }
+    });
+  });
+
+  // 统一保存：一次性收齐所有字段
+  function 收集全部配置() {
+    return 收集界面配置();
+  }
+  async function 保存全部配置() {
+    // 至少启用一个通道
+    const 值值20085 = document.getElementById('ev'),
+      值值20084 = document.getElementById('et'),
+      值值20083 = document.getElementById('ex');
+    if (值值20085 && 值值20084 && 值值20083 && !值值20085.checked && !值值20084.checked && !值值20083.checked) {
+      显示操作状态('${是否值236 ? 解码64('2K3Yr9in2YLZhCDbjNqpINm+2LHZiNiq2qnZhCDYsdinINmB2LnYp9mEINqp2YbbjNivIQ==') : 解码64('6Iez5bCR6ZyA6KaB5ZCv55So5LiA5Liq5Y2P6K6u77yB')}', 'err');
+      显示提示('${是否值236 ? 解码64('2K3Yr9in2YLZhCDbjNqpINm+2LHZiNiq2qnZhCDYsdinINmB2LnYp9mEINqp2YbbjNivIQ==') : 解码64('6Iez5bCR6ZyA6KaB5ZCv55So5LiA5Liq5Y2P6K6u77yB')}', 'warn');
+      return;
+    }
+    const 本地值20082 = document.getElementById('cpBtnSaveAll');
+    if (本地值20082) {
+      本地值20082.classList.add('cp-action-btn-saving');
+      本地值20082.disabled = true;
+    }
+    try {
+      await 保存配置(收集全部配置());
+    } finally {
+      if (本地值20082) {
+        本地值20082.classList.remove('cp-action-btn-saving');
+        本地值20082.disabled = false;
+      }
+    }
+  }
+  window.保存全部配置 = 保存全部配置;
+  function 显示操作状态(消息, 类型) {
+    const 本地值20081 = document.getElementById('cpActionStatus');
+    if (!本地值20081) return;
+    本地值20081.textContent = 消息;
+    本地值20081.classList.toggle('cp-err', 类型 === 'err');
+    本地值20081.classList.add('cp-show');
+    clearTimeout(显示操作状态._t);
+    显示操作状态._t = setTimeout(function () {
+      本地值20081.classList.remove('cp-show');
+    }, 2400);
+  }
+  window.显示操作状态 = 显示操作状态;
+
+  // 绑定底部统一操作条
+  const 值操作值 = document.getElementById('cpActionBar');
+  const 值值保存值 = document.getElementById('cpBtnSaveAll');
+  if (值值保存值) 值值保存值.addEventListener('click', async function () {
+    值值保存值.classList.add('cp-action-btn-saving');
+    try {
+      await 保存全部配置();
+      if (值操作值) 值操作值.classList.remove('cp-dirty');
+    } finally {
+      值值保存值.classList.remove('cp-action-btn-saving');
+    }
+  });
+  const 值值值20080 = document.getElementById('cpBtnRefresh');
+  if (值值值20080) 值值值20080.addEventListener('click', async function () {
+    值值值20080.classList.add('cp-action-btn-saving');
+    try {
+      await 加载当前配置();
+      if (值操作值) 值操作值.classList.remove('cp-dirty');
+      显示操作状态('${是否值236 ? 'تنظیمات تازه‌سازی شد' : '配置已刷新'}');
+    } finally {
+      值值值20080.classList.remove('cp-action-btn-saving');
+    }
+  });
+  const 值值重置 = document.getElementById('cpBtnReset');
+  if (值值重置) 值值重置.addEventListener('click', 重置全部配置);
+
+  // 修改字段时把 FAB 标记为 "未保存"
+  function 标记已修改() {
+    if (值操作值) 值操作值.classList.add('cp-dirty');
+  }
+  const 已修改范围 = document.getElementById('configContent') || document;
+  ['input', 'change'].forEach(function (本地值20079) {
+    已修改范围.addEventListener(本地值20079, function (事件值20078) {
+      const 本地值20077 = 事件值20078.target;
+      if (!本地值20077 || !本地值20077.tagName) return;
+      const 本地值20076 = 本地值20077.tagName.toLowerCase();
+      if (本地值20076 === 'input' || 本地值20076 === 'select' || 本地值20076 === 'textarea') {
+        // 跳过延迟测试相关输入，避免误触
+        if (本地值20077.id && /^(latencyTestInput|fetchURLInput|latencyTestPort|randomIPCount|testThreads|ipSourceSelect)$/.test(本地值20077.id)) return;
+        标记已修改();
+      }
+    });
+  });
+
+  // Ctrl+S / Cmd+S 触发保存
+  window.addEventListener('keydown', function (事件值20075) {
+    if ((事件值20075.ctrlKey || 事件值20075.metaKey) && (事件值20075.key === 's' || 事件值20075.key === 'S')) {
+      事件值20075.preventDefault();
+      if (值值保存值 && !值值保存值.classList.contains('cp-action-btn-saving')) {
+        值值保存值.click();
+      }
+    }
+  });
+  let 测试值控制器 = null;
+  let 测试结果列表 = [];
+  const 开始测试值 = document.getElementById('startLatencyTest');
+  const 值测试值 = document.getElementById('stopLatencyTest');
+  const 测试状态 = document.getElementById('latencyTestStatus');
+  const 测试结果列表值 = document.getElementById('latencyTestResults');
+  const 结果列表列表 = document.getElementById('latencyResultsList');
+  const 覆盖已选值 = document.getElementById('overwriteSelectedToYx');
+  const 追加已选值 = document.getElementById('appendSelectedToYx');
+  const 选择值值 = document.getElementById('selectAllResults');
+  const 值值值 = document.getElementById('deselectAllResults');
+  const 地址源选择 = document.getElementById('ipSourceSelect');
+  const 手动输入值 = document.getElementById('manualInputDiv');
+  const 网址获取值 = document.getElementById('urlFetchDiv');
+  const 延迟测试输入 = document.getElementById('latencyTestInput');
+  const 获取网址输入 = document.getElementById('fetchURLInput');
+  const 延迟测试端口 = document.getElementById('latencyTestPort');
+  const 随机地址数量 = document.getElementById('randomIPCount');
+  const 云墙随机值 = document.getElementById('cfRandomDiv');
+  const 随机数量值 = document.getElementById('randomCountDiv');
+  const 生成云墙地址值 = document.getElementById('generateCFIPBtn');
+  const 获取地址值 = document.getElementById('fetchIPBtn');
+  if (延迟测试输入) {
+    const 已保存测试输入 = localStorage.getItem('latencyTestInput');
+    if (已保存测试输入) 延迟测试输入.value = 已保存测试输入;
+    延迟测试输入.addEventListener('input', function () {
+      localStorage.setItem('latencyTestInput', this.value);
+    });
+  }
+  if (获取网址输入) {
+    const 已保存获取网址 = localStorage.getItem('fetchURLInput');
+    if (已保存获取网址) 获取网址输入.value = 已保存获取网址;
+    获取网址输入.addEventListener('input', function () {
+      localStorage.setItem('fetchURLInput', this.value);
+    });
+  }
+  if (延迟测试端口) {
+    const 已保存端口 = localStorage.getItem('latencyTestPort');
+    if (已保存端口) 延迟测试端口.value = 已保存端口;
+    延迟测试端口.addEventListener('input', function () {
+      localStorage.setItem('latencyTestPort', this.value);
+    });
+  }
+  if (随机地址数量) {
+    const 已保存数量 = localStorage.getItem('randomIPCount');
+    if (已保存数量) 随机地址数量.value = 已保存数量;
+    随机地址数量.addEventListener('input', function () {
+      localStorage.setItem('randomIPCount', this.value);
+    });
+    // 初始化时，如果默认是隐藏的，则禁用输入框
+    if (随机数量值 && 随机数量值.style.display === 'none') {
+      随机地址数量.disabled = true;
+    }
+  }
+  const 测试线程数输入 = document.getElementById('testThreads');
+  if (测试线程数输入) {
+    const 已保存线程数 = localStorage.getItem('testThreads');
+    if (已保存线程数) 测试线程数输入.value = 已保存线程数;
+    测试线程数输入.addEventListener('input', function () {
+      localStorage.setItem('testThreads', this.value);
+    });
+  }
+  if (地址源选择) {
+    const 已保存源 = localStorage.getItem('ipSourceSelect');
+    const 当前源 = 已保存源 || 地址源选择.value || 'manual';
+    if (已保存源) {
+      地址源选择.value = 已保存源;
+    }
+    手动输入值.style.display = 当前源 === 'manual' ? 'block' : 'none';
+    网址获取值.style.display = 当前源 === 'urlFetch' ? 'block' : 'none';
+    云墙随机值.style.display = 当前源 === 'cfRandom' ? 'block' : 'none';
+    随机数量值.style.display = 当前源 === 'cfRandom' ? 'block' : 'none';
+    // 当隐藏时禁用输入框，避免表单验证错误
+    if (随机地址数量) {
+      随机地址数量.disabled = 当前源 !== 'cfRandom';
+    }
+  }
+  const 云墙网段列表 = ['173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13', '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'];
+  function 从网段生成随机地址(网段20074) {
+    const [基础地址, 前缀长度] = 网段20074.split('/');
+    const 前缀 = parseInt(前缀长度);
+    const 主机值 = 32 - 前缀;
+    const 地址部分列表 = 基础地址.split('.').map(参数值20073 => parseInt(参数值20073));
+    const 地址值 = 地址部分列表[0] << 24 | 地址部分列表[1] << 16 | 地址部分列表[2] << 8 | 地址部分列表[3];
+    const 随机偏移 = Math.floor(Math.random() * Math.pow(2, 主机值));
+    const 掩码 = 0xFFFFFFFF << 主机值 >>> 0;
+    const 随机地址 = ((地址值 & 掩码) >>> 0) + 随机偏移 >>> 0;
+    return [随机地址 >>> 24 & 0xFF, 随机地址 >>> 16 & 0xFF, 随机地址 >>> 8 & 0xFF, 随机地址 & 0xFF].join('.');
+  }
+  function 生成云墙随机地址(数量20072, 端口20071) {
+    const 地址列表20070 = [];
+    for (let 索引值20069 = 0; 索引值20069 < 数量20072; 索引值20069++) {
+      const 网段 = 云墙网段列表[Math.floor(Math.random() * 云墙网段列表.length)];
+      const 地址20068 = 从网段生成随机地址(网段);
+      地址列表20070.push(地址20068 + ':' + 端口20071);
+    }
+    return 地址列表20070;
+  }
+  if (地址源选择) {
+    地址源选择.addEventListener('change', function () {
+      const 值 = this.value;
+      localStorage.setItem('ipSourceSelect', 值);
+      手动输入值.style.display = 值 === 'manual' ? 'block' : 'none';
+      网址获取值.style.display = 值 === 'urlFetch' ? 'block' : 'none';
+      云墙随机值.style.display = 值 === 'cfRandom' ? 'block' : 'none';
+      随机数量值.style.display = 值 === 'cfRandom' ? 'block' : 'none';
+      // 当隐藏时禁用输入框，避免表单验证错误
+      if (随机地址数量) {
+        随机地址数量.disabled = 值 !== 'cfRandom';
+      }
+    });
+  }
+  if (生成云墙地址值) {
+    生成云墙地址值.addEventListener('click', function () {
+      const 数量 = parseInt(document.getElementById('randomIPCount').value) || 20;
+      const 端口20067 = document.getElementById('latencyTestPort').value || '443';
+      const 地址列表 = 生成云墙随机地址(数量, 端口20067);
+      document.getElementById('latencyTestInput').value = 地址列表.join(',');
+      手动输入值.style.display = 'block';
+      显示状态('${是否值236 ? 'تولید شد' : '已生成'} ' + 数量 + ' ${是否值236 ? 'IP تصادفی CF' : '个CF随机IP'}', 'success');
+    });
+  }
+  if (获取地址值) {
+    获取地址值.addEventListener('click', async function () {
+      const 网址输入 = document.getElementById('fetchURLInput');
+      const 获取网址 = 网址输入.value.trim();
+      if (!获取网址) {
+        显示提示('${是否值236 ? 'لطفا URL را وارد کنید' : '请输入URL'}', 'warn');
+        return;
+      }
+      获取地址值.disabled = true;
+      获取地址值.textContent = '${是否值236 ? 'در حال دریافت...' : '获取中...'}';
+      try {
+        // 支持多个 URL（逗号分隔）以及返回内容中逗号分隔的多个 IP/节点
+        const 网址列表 = Array.from(new Set(获取网址.split(',').map(网址值20066 => 网址值20066.trim()).filter(网址值20065 => 网址值20065)));
+        const 值项目列表 = [];
+        for (const 网址值 of 网址列表) {
+          const 响应 = await fetch(网址值);
+          if (!响应.ok) {
+            throw new Error('HTTP ' + 响应.status + ' @ ' + 网址值);
+          }
+          const 文本20064 = await 响应.text();
+
+          // 先按行分割，再在每行内按逗号分割，兼容“多行 + 逗号分隔”两种格式
+          const 值网址项目列表 = 文本20064.split(/\\r?\\n/).map(行值20063 => 行值20063.trim()).filter(行值20062 => 行值20062 && !行值20062.startsWith('#')).flatMap(行值 => 行值.split(',').map(参数值20061 => 参数值20061.trim()).filter(参数值 => 参数值));
+          值项目列表.push(...值网址项目列表);
+        }
+        if (值项目列表.length > 0) {
+          document.getElementById('latencyTestInput').value = 值项目列表.join(',');
+          手动输入值.style.display = 'block';
+          显示状态('${是否值236 ? 'دریافت شد' : '已获取'} ' + 值项目列表.length + ' ${是否值236 ? 'IP' : '个IP'}', 'success');
+        } else {
+          显示状态('${是否值236 ? 'داده‌ای یافت نشد' : '未获取到数据'}', 'error');
+        }
+      } catch (错误20060) {
+        显示状态('${是否值236 ? 'خطا در دریافت' : '获取失败'}: ' + 错误20060.message, 'error');
+      } finally {
+        获取地址值.disabled = false;
+        获取地址值.textContent = '⬇ ${是否值236 ? 'دریافت IP' : '获取IP'}';
+      }
+    });
+  }
+  if (开始测试值) {
+    开始测试值.addEventListener('click', async function () {
+      const 输入值20059 = document.getElementById('latencyTestInput');
+      const 端口值 = document.getElementById('latencyTestPort');
+      const 线程数值 = document.getElementById('testThreads');
+      const 输入值 = 输入值20059.value.trim();
+      const 默认端口 = 端口值.value || '443';
+      const 线程数 = parseInt(线程数值.value) || 5;
+      if (!输入值) {
+        显示状态('${是否值236 ? 'لطفا IP یا دامنه وارد کنید' : '请输入IP或域名'}', 'error');
+        return;
+      }
+      const 本地值20058 = 输入值.split(',').map(翻译值20057 => 翻译值20057.trim()).filter(翻译值20056 => 翻译值20056);
+      if (本地值20058.length === 0) return;
+      开始测试值.style.display = 'none';
+      值测试值.style.display = 'inline-block';
+      测试状态.style.display = 'block';
+      测试结果列表值.style.display = 'block';
+      结果列表列表.innerHTML = '';
+      测试结果列表 = [];
+      if (城市筛选值) {
+        城市筛选值.style.display = 'none';
+      }
+      测试值控制器 = new AbortController();
+      let 本地值20055 = 0;
+      const 本地值20054 = 本地值20058.length;
+      function 解析目标(目标20053) {
+        let 主机20052 = 目标20053;
+        let 端口20051 = 默认端口;
+        let 节点名称20050 = '';
+        if (目标20053.includes('#')) {
+          const 部分列表20049 = 目标20053.split('#');
+          节点名称20050 = 部分列表20049[1] || '';
+          主机20052 = 部分列表20049[0];
+        }
+        if (主机20052.includes(':') && !主机20052.startsWith('[')) {
+          const 值值20048 = 主机20052.lastIndexOf(':');
+          const 值端口 = 主机20052.substring(值值20048 + 1);
+          if (/^[0-9]+$/.test(值端口)) {
+            端口20051 = 值端口;
+            主机20052 = 主机20052.substring(0, 值值20048);
+          }
+        } else if (主机20052.includes(']:')) {
+          const 部分列表20047 = 主机20052.split(']:');
+          主机20052 = 部分列表20047[0] + ']';
+          端口20051 = 部分列表20047[1];
+        }
+        return {
+          host: 主机20052,
+          port: 端口20051,
+          nodeName: 节点名称20050
+        };
+      }
+      function 渲染结果(结果20046, 索引20045, 值值20044 = true) {
+        // 只展示在线优选成功的结果，失败/超时的不再显示
+        if (!结果20046.success) {
+          return null;
+        }
+        const 结果项目 = document.createElement('div');
+        结果项目.style.cssText = 'display: flex; align-items: center; padding: 8px; border-bottom: 1px solid #003300; gap: 10px;';
+        结果项目.dataset.index = 索引20045;
+        结果项目.dataset.colo = 结果20046.colo || '';
+        if (!值值20044) {
+          结果项目.style.display = 'none';
+        }
+        const 复选框20043 = document.createElement('input');
+        复选框20043.type = 'checkbox';
+        复选框20043.checked = true;
+        复选框20043.disabled = false;
+        复选框20043.dataset.index = 索引20045;
+        复选框20043.style.cssText = 'width: 18px; height: 18px; cursor: pointer;';
+        const 本地值20042 = document.createElement('div');
+        本地值20042.style.cssText = 'flex: 1; font-family: monospace; font-size: 13px;';
+        const 机房名称20041 = 结果20046.colo ? 获取机房名称(结果20046.colo) : '';
+        const 机房显示 = 机房名称20041 ? ' <span style="color: #00aaff;">[' + 机房名称20041 + ']</span>' : '';
+        本地值20042.innerHTML = '<span style="color: #00f0ff;">' + 结果20046.host + ':' + 结果20046.port + '</span>' + 机房显示 + ' <span style="color: #ffff00;">' + 结果20046.latency + 'ms</span>';
+        结果项目.appendChild(复选框20043);
+        结果项目.appendChild(本地值20042);
+        结果列表列表.appendChild(结果项目);
+        return 结果项目;
+      }
+      async function 测试单项(目标) {
+        if (测试值控制器.signal.aborted) return null;
+        const {
+          host: 主机20040,
+          port: 端口20039,
+          nodeName: 节点名称
+        } = 解析目标(目标);
+        const 结果20038 = await 测试延迟(主机20040, 端口20039, 测试值控制器.signal);
+        结果20038.host = 主机20040;
+        结果20038.port = 端口20039;
+        结果20038.nodeName = 结果20038.success && 结果20038.colo ? 节点名称 || 'CF-' + 结果20038.colo : 节点名称 || 主机20040;
+        return 结果20038;
+      }
+      for (let 索引值20037 = 0; 索引值20037 < 本地值20054; 索引值20037 += 线程数) {
+        if (测试值控制器.signal.aborted) break;
+        const 本地值20036 = 本地值20058.slice(索引值20037, Math.min(索引值20037 + 线程数, 本地值20054));
+        测试状态.textContent = '${是否值236 ? 'در حال تست' : '测试中'}: ' + (索引值20037 + 1) + '-' + Math.min(索引值20037 + 线程数, 本地值20054) + '/' + 本地值20054 + ' (${是否值236 ? 'رشته‌ها' : '线程'}: ' + 线程数 + ')';
+        const 结果列表 = await Promise.all(本地值20036.map(翻译值 => 测试单项(翻译值)));
+        for (const 结果20035 of 结果列表) {
+          if (结果20035) {
+            const 索引20034 = 测试结果列表.length;
+            测试结果列表.push(结果20035);
+            渲染结果(结果20035, 索引20034);
+            本地值20055++;
+          }
+        }
+      }
+      测试状态.textContent = '${是否值236 ? 'تست کامل شد' : '测试完成'}: ' + 本地值20055 + '/' + 本地值20054;
+      开始测试值.style.display = 'inline-block';
+      值测试值.style.display = 'none';
+
+      // 更新城市选择器
+      更新城市筛选();
+    });
+  }
+  if (值测试值) {
+    值测试值.addEventListener('click', function () {
+      if (测试值控制器) {
+        测试值控制器.abort();
+      }
+      开始测试值.style.display = 'inline-block';
+      值测试值.style.display = 'none';
+      测试状态.textContent = '${是否值236 ? 'تست متوقف شد' : '测试已停止'}';
+    });
+  }
+  if (选择值值) {
+    选择值值.addEventListener('click', function () {
+      const 本地值20033 = 结果列表列表.querySelectorAll('input[type="checkbox"]:not(:disabled)');
+      本地值20033.forEach(本地值20032 => 本地值20032.checked = true);
+    });
+  }
+  if (值值值) {
+    值值值.addEventListener('click', function () {
+      const 本地值20031 = 结果列表列表.querySelectorAll('input[type="checkbox"]');
+      本地值20031.forEach(本地值20030 => 本地值20030.checked = false);
+    });
+  }
+
+  // 获取选中项的通用函数
+  function 获取已选项目() {
+    const 本地值20029 = 结果列表列表.querySelectorAll('input[type="checkbox"]:checked');
+    if (本地值20029.length === 0) {
+      显示状态('${是否值236 ? 'لطفا حداقل یک مورد انتخاب کنید' : '请至少选择一项'}', 'error');
+      return null;
+    }
+    const 已选项目列表20028 = [];
+    本地值20029.forEach(本地值20027 => {
+      const 索引20026 = parseInt(本地值20027.dataset.index);
+      const 结果20025 = 测试结果列表[索引20026];
+      if (结果20025 && 结果20025.success) {
+        const 机房名称 = 结果20025.colo ? 获取机房名称(结果20025.colo) : 结果20025.nodeName;
+        const 项目字符串 = 结果20025.host + ':' + 结果20025.port + '#' + 机房名称;
+        已选项目列表20028.push(项目字符串);
+      }
+    });
+    return 已选项目列表20028;
+  }
+
+  // 覆盖添加
+  if (覆盖已选值) {
+    覆盖已选值.addEventListener('click', async function () {
+      const 已选项目列表20024 = 获取已选项目();
+      if (!已选项目列表20024 || 已选项目列表20024.length === 0) return;
+      const 值输入20023 = document.getElementById('yx');
+      const 新值20022 = 已选项目列表20024.join(',');
+      值输入20023.value = 新值20022;
+      覆盖已选值.disabled = true;
+      追加已选值.disabled = true;
+      覆盖已选值.textContent = '${是否值236 ? 'در حال ذخیره...' : '保存中...'}';
+      try {
+        const 配置数据20021 = {
+          customIP: document.getElementById('customIP').value,
+          yx: 新值20022,
+          yxURL: document.getElementById('yxURL').value,
+          s: document.getElementById('socksConfig').value
+        };
+        await 保存配置(配置数据20021);
+        显示状态('${是否值236 ? 'موفقیت‌آمیز بود' : '已覆盖'} ' + 已选项目列表20024.length + ' ${是否值236 ? 'مورد و ذخیره شد' : '项并已保存'}', 'success');
+      } catch (错误20020) {
+        显示状态('${是否值236 ? 'خطا در ذخیره' : '保存失败'}: ' + 错误20020.message, 'error');
+      } finally {
+        覆盖已选值.disabled = false;
+        追加已选值.disabled = false;
+        覆盖已选值.textContent = '${是否值236 ? '覆盖添加' : '覆盖添加'}';
+      }
+    });
+  }
+
+  // 追加添加
+  if (追加已选值) {
+    追加已选值.addEventListener('click', async function () {
+      const 已选项目列表 = 获取已选项目();
+      if (!已选项目列表 || 已选项目列表.length === 0) return;
+      const 值输入 = document.getElementById('yx');
+      const 当前值 = 值输入.value.trim();
+      const 新项目列表 = 已选项目列表.join(',');
+      const 新值 = 当前值 ? 当前值 + ',' + 新项目列表 : 新项目列表;
+      值输入.value = 新值;
+      覆盖已选值.disabled = true;
+      追加已选值.disabled = true;
+      追加已选值.textContent = '${是否值236 ? 'در حال ذخیره...' : '保存中...'}';
+      try {
+        const 配置数据 = {
+          customIP: document.getElementById('customIP').value,
+          yx: 新值,
+          yxURL: document.getElementById('yxURL').value,
+          s: document.getElementById('socksConfig').value
+        };
+        await 保存配置(配置数据);
+        显示状态('${是否值236 ? 'موفقیت‌آمیز بود' : '已追加'} ' + 已选项目列表.length + ' ${是否值236 ? 'مورد و ذخیره شد' : '项并已保存'}', 'success');
+      } catch (错误20019) {
+        显示状态('${是否值236 ? 'خطا در ذخیره' : '保存失败'}: ' + 错误20019.message, 'error');
+      } finally {
+        覆盖已选值.disabled = false;
+        追加已选值.disabled = false;
+        追加已选值.textContent = '${是否值236 ? '追加添加' : '追加添加'}';
+      }
+    });
+  }
+  function 地址转十六进制(地址) {
+    const 部分列表 = 地址.split('.');
+    if (部分列表.length !== 4) return null;
+    let 十六进制 = '';
+    for (let 索引值 = 0; 索引值 < 4; 索引值++) {
+      const 数字 = parseInt(部分列表[索引值]);
+      if (isNaN(数字) || 数字 < 0 || 数字 > 255) return null;
+      十六进制 += 数字.toString(16).padStart(2, '0');
+    }
+    return 十六进制;
+  }
+  const 机房映射 = {
+    'SJC': '🇺🇸 圣何塞',
+    'LAX': '🇺🇸 洛杉矶',
+    'SEA': '🇺🇸 西雅图',
+    'SFO': '🇺🇸 旧金山',
+    'DFW': '🇺🇸 达拉斯',
+    'ORD': '🇺🇸 芝加哥',
+    'IAD': '🇺🇸 华盛顿',
+    'ATL': '🇺🇸 亚特兰大',
+    'MIA': '🇺🇸 迈阿密',
+    'DEN': '🇺🇸 丹佛',
+    'PHX': '🇺🇸 凤凰城',
+    'BOS': '🇺🇸 波士顿',
+    'EWR': '🇺🇸 纽瓦克',
+    'JFK': '🇺🇸 纽约',
+    'LAS': '🇺🇸 拉斯维加斯',
+    'MSP': '🇺🇸 明尼阿波利斯',
+    'DTW': '🇺🇸 底特律',
+    'PHL': '🇺🇸 费城',
+    'CLT': '🇺🇸 夏洛特',
+    'SLC': '🇺🇸 盐湖城',
+    'PDX': '🇺🇸 波特兰',
+    'SAN': '🇺🇸 圣地亚哥',
+    'TPA': '🇺🇸 坦帕',
+    'IAH': '🇺🇸 休斯顿',
+    'MCO': '🇺🇸 奥兰多',
+    'AUS': '🇺🇸 奥斯汀',
+    'BNA': '🇺🇸 纳什维尔',
+    'RDU': '🇺🇸 罗利',
+    'IND': '🇺🇸 印第安纳波利斯',
+    'CMH': '🇺🇸 哥伦布',
+    'MCI': '🇺🇸 堪萨斯城',
+    'OMA': '🇺🇸 奥马哈',
+    'ABQ': '🇺🇸 阿尔伯克基',
+    'OKC': '🇺🇸 俄克拉荷马城',
+    'MEM': '🇺🇸 孟菲斯',
+    'JAX': '🇺🇸 杰克逊维尔',
+    'RIC': '🇺🇸 里士满',
+    'BUF': '🇺🇸 布法罗',
+    'PIT': '🇺🇸 匹兹堡',
+    'CLE': '🇺🇸 克利夫兰',
+    'CVG': '🇺🇸 辛辛那提',
+    'MKE': '🇺🇸 密尔沃基',
+    'STL': '🇺🇸 圣路易斯',
+    'SAT': '🇺🇸 圣安东尼奥',
+    'HNL': '🇺🇸 檀香山',
+    'ANC': '🇺🇸 安克雷奇',
+    'SMF': '🇺🇸 萨克拉门托',
+    'ONT': '🇺🇸 安大略',
+    'OAK': '🇺🇸 奥克兰',
+    'HKG': '🇭🇰 香港',
+    'TPE': '🇹🇼 台北',
+    'TSA': '🇹🇼 台北松山',
+    'KHH': '🇹🇼 高雄',
+    'NRT': '🇯🇵 东京成田',
+    'HND': '🇯🇵 东京羽田',
+    'KIX': '🇯🇵 大阪关西',
+    'ITM': '🇯🇵 大阪伊丹',
+    'NGO': '🇯🇵 名古屋',
+    'FUK': '🇯🇵 福冈',
+    'CTS': '🇯🇵 札幌',
+    'OKA': '🇯🇵 冲绳',
+    'ICN': '🇰🇷 首尔仁川',
+    'GMP': '🇰🇷 首尔金浦',
+    'PUS': '🇰🇷 釜山',
+    'SIN': '🇸🇬 新加坡',
+    'BKK': '🇹🇭 曼谷',
+    'DMK': '🇹🇭 曼谷廊曼',
+    'KUL': '🇲🇾 吉隆坡',
+    'CGK': '🇮🇩 雅加达',
+    'MNL': '🇵🇭 马尼拉',
+    'CEB': '🇵🇭 宿务',
+    'HAN': '🇻🇳 河内',
+    'SGN': '🇻🇳 胡志明',
+    'DAD': '🇻🇳 岘港',
+    'RGN': '🇲🇲 仰光',
+    'PNH': '🇰🇭 金边',
+    'REP': '🇰🇭 暹粒',
+    'VTE': '🇱🇦 万象',
+    'BOM': '🇮🇳 孟买',
+    'DEL': '🇮🇳 新德里',
+    'MAA': '🇮🇳 金奈',
+    'BLR': '🇮🇳 班加罗尔',
+    'CCU': '🇮🇳 加尔各答',
+    'HYD': '🇮🇳 海得拉巴',
+    'AMD': '🇮🇳 艾哈迈达巴德',
+    'COK': '🇮🇳 科钦',
+    'PNQ': '🇮🇳 浦那',
+    'GOI': '🇮🇳 果阿',
+    'CMB': '🇱🇰 科伦坡',
+    'DAC': '🇧🇩 达卡',
+    'KTM': '🇳🇵 加德满都',
+    'ISB': '🇵🇰 伊斯兰堡',
+    'KHI': '🇵🇰 卡拉奇',
+    'LHE': '🇵🇰 拉合尔',
+    'LHR': '🇬🇧 伦敦希思罗',
+    'LGW': '🇬🇧 伦敦盖特威克',
+    'STN': '🇬🇧 伦敦斯坦斯特德',
+    'LTN': '🇬🇧 伦敦卢顿',
+    'MAN': '🇬🇧 曼彻斯特',
+    'EDI': '🇬🇧 爱丁堡',
+    'BHX': '🇬🇧 伯明翰',
+    'CDG': '🇫🇷 巴黎戴高乐',
+    'ORY': '🇫🇷 巴黎奥利',
+    'MRS': '🇫🇷 马赛',
+    'LYS': '🇫🇷 里昂',
+    'NCE': '🇫🇷 尼斯',
+    'FRA': '🇩🇪 法兰克福',
+    'MUC': '🇩🇪 慕尼黑',
+    'TXL': '🇩🇪 柏林',
+    'BER': '🇩🇪 柏林勃兰登堡',
+    'HAM': '🇩🇪 汉堡',
+    'DUS': '🇩🇪 杜塞尔多夫',
+    'CGN': '🇩🇪 科隆',
+    'STR': '🇩🇪 斯图加特',
+    'AMS': '🇳🇱 阿姆斯特丹',
+    'BRU': '🇧🇪 布鲁塞尔',
+    'LUX': '🇱🇺 卢森堡',
+    'ZRH': '🇨🇭 苏黎世',
+    'GVA': '🇨🇭 日内瓦',
+    'BSL': '🇨🇭 巴塞尔',
+    'VIE': '🇦🇹 维也纳',
+    'PRG': '🇨🇿 布拉格',
+    'BUD': '🇭🇺 布达佩斯',
+    'WAW': '🇵🇱 华沙',
+    'KRK': '🇵🇱 克拉科夫',
+    'MXP': '🇮🇹 米兰马尔彭萨',
+    'LIN': '🇮🇹 米兰利纳特',
+    'FCO': '🇮🇹 罗马',
+    'VCE': '🇮🇹 威尼斯',
+    'NAP': '🇮🇹 那不勒斯',
+    'FLR': '🇮🇹 佛罗伦萨',
+    'BGY': '🇮🇹 贝加莫',
+    'MAD': '🇪🇸 马德里',
+    'BCN': '🇪🇸 巴塞罗那',
+    'PMI': '🇪🇸 帕尔马',
+    'AGP': '🇪🇸 马拉加',
+    'VLC': '🇪🇸 瓦伦西亚',
+    'SVQ': '🇪🇸 塞维利亚',
+    'BIO': '🇪🇸 毕尔巴鄂',
+    'LIS': '🇵🇹 里斯本',
+    'OPO': '🇵🇹 波尔图',
+    'FAO': '🇵🇹 法鲁',
+    'DUB': '🇮🇪 都柏林',
+    'CPH': '🇩🇰 哥本哈根',
+    'ARN': '🇸🇪 斯德哥尔摩',
+    'GOT': '🇸🇪 哥德堡',
+    'OSL': '🇳🇴 奥斯陆',
+    'BGO': '🇳🇴 卑尔根',
+    'HEL': '🇫🇮 赫尔辛基',
+    'RIX': '🇱🇻 里加',
+    'TLL': '🇪🇪 塔林',
+    'VNO': '🇱🇹 维尔纽斯',
+    'ATH': '🇬🇷 雅典',
+    'SKG': '🇬🇷 塞萨洛尼基',
+    'SOF': '🇧🇬 索非亚',
+    'OTP': '🇷🇴 布加勒斯特',
+    'BEG': '🇷🇸 贝尔格莱德',
+    'ZAG': '🇭🇷 萨格勒布',
+    'LJU': '🇸🇮 卢布尔雅那',
+    'KBP': '🇺🇦 基辅',
+    'IEV': '🇺🇦 基辅茹良尼',
+    'ODS': '🇺🇦 敖德萨',
+    'SVO': '🇷🇺 莫斯科谢列梅捷沃',
+    'DME': '🇷🇺 莫斯科多莫杰多沃',
+    'VKO': '🇷🇺 莫斯科伏努科沃',
+    'LED': '🇷🇺 圣彼得堡',
+    'IST': '🇹🇷 伊斯坦布尔',
+    'SAW': '🇹🇷 伊斯坦布尔萨比哈',
+    'ESB': '🇹🇷 安卡拉',
+    'AYT': '🇹🇷 安塔利亚',
+    'ADB': '🇹🇷 伊兹密尔',
+    'TLV': '🇮🇱 特拉维夫',
+    'AMM': '🇯🇴 安曼',
+    'BEY': '🇱🇧 贝鲁特',
+    'BAH': '🇧🇭 巴林',
+    'KWI': '🇰🇼 科威特',
+    'DXB': '🇦🇪 迪拜',
+    'AUH': '🇦🇪 阿布扎比',
+    'SHJ': '🇦🇪 沙迦',
+    'DOH': '🇶🇦 多哈',
+    'MCT': '🇴🇲 马斯喀特',
+    'RUH': '🇸🇦 利雅得',
+    'JED': '🇸🇦 吉达',
+    'DMM': '🇸🇦 达曼',
+    'CAI': '🇪🇬 开罗',
+    'HBE': '🇪🇬 亚历山大',
+    'SSH': '🇪🇬 沙姆沙伊赫',
+    'CMN': '🇲🇦 卡萨布兰卡',
+    'RAK': '🇲🇦 马拉喀什',
+    'TUN': '🇹🇳 突尼斯',
+    'ALG': '🇩🇿 阿尔及尔',
+    'LOS': '🇳🇬 拉各斯',
+    'ABV': '🇳🇬 阿布贾',
+    'ACC': '🇬🇭 阿克拉',
+    'NBO': '🇰🇪 内罗毕',
+    'MBA': '🇰🇪 蒙巴萨',
+    'ADD': '🇪🇹 亚的斯亚贝巴',
+    'DAR': '🇹🇿 达累斯萨拉姆',
+    'JNB': '🇿🇦 约翰内斯堡',
+    'CPT': '🇿🇦 开普敦',
+    'DUR': '🇿🇦 德班',
+    'HRE': '🇿🇼 哈拉雷',
+    'LUN': '🇿🇲 卢萨卡',
+    'MRU': '🇲🇺 毛里求斯',
+    'SEZ': '🇸🇨 塞舌尔',
+    'SYD': '🇦🇺 悉尼',
+    'MEL': '🇦🇺 墨尔本',
+    'BNE': '🇦🇺 布里斯班',
+    'PER': '🇦🇺 珀斯',
+    'ADL': '🇦🇺 阿德莱德',
+    'CBR': '🇦🇺 堪培拉',
+    'OOL': '🇦🇺 黄金海岸',
+    'CNS': '🇦🇺 凯恩斯',
+    'AKL': '🇳🇿 奥克兰',
+    'WLG': '🇳🇿 惠灵顿',
+    'CHC': '🇳🇿 基督城',
+    'ZQN': '🇳🇿 皇后镇',
+    'NAN': '🇫🇯 楠迪',
+    'PPT': '🇵🇫 帕皮提',
+    'GUM': '🇬🇺 关岛',
+    'GRU': '🇧🇷 圣保罗瓜鲁柳斯',
+    'CGH': '🇧🇷 圣保罗孔戈尼亚斯',
+    'GIG': '🇧🇷 里约热内卢',
+    'BSB': '🇧🇷 巴西利亚',
+    'CNF': '🇧🇷 贝洛奥里藏特',
+    'POA': '🇧🇷 阿雷格里港',
+    'CWB': '🇧🇷 库里蒂巴',
+    'FOR': '🇧🇷 福塔莱萨',
+    'REC': '🇧🇷 累西腓',
+    'SSA': '🇧🇷 萨尔瓦多',
+    'EZE': '🇦🇷 布宜诺斯艾利斯',
+    'AEP': '🇦🇷 布宜诺斯艾利斯城',
+    'COR': '🇦🇷 科尔多瓦',
+    'MDZ': '🇦🇷 门多萨',
+    'SCL': '🇨🇱 圣地亚哥',
+    'LIM': '🇵🇪 利马',
+    'BOG': '🇨🇴 波哥大',
+    'MDE': '🇨🇴 麦德林',
+    'CLO': '🇨🇴 卡利',
+    'UIO': '🇪🇨 基多',
+    'GYE': '🇪🇨 瓜亚基尔',
+    'CCS': '🇻🇪 加拉加斯',
+    'MVD': '🇺🇾 蒙得维的亚',
+    'ASU': '🇵🇾 亚松森',
+    'PTY': '🇵🇦 巴拿马城',
+    'SJO': '🇨🇷 圣何塞',
+    'GUA': '🇬🇹 危地马拉城',
+    'SAL': '🇸🇻 圣萨尔瓦多',
+    'TGU': '🇭🇳 特古西加尔巴',
+    'MGA': '🇳🇮 马那瓜',
+    'BZE': '🇧🇿 伯利兹城',
+    'MEX': '🇲🇽 墨西哥城',
+    'GDL': '🇲🇽 瓜达拉哈拉',
+    'MTY': '🇲🇽 蒙特雷',
+    'CUN': '🇲🇽 坎昆',
+    'TIJ': '🇲🇽 蒂华纳',
+    'SJD': '🇲🇽 圣何塞德尔卡沃',
+    'YYZ': '🇨🇦 多伦多',
+    'YVR': '🇨🇦 温哥华',
+    'YUL': '🇨🇦 蒙特利尔',
+    'YYC': '🇨🇦 卡尔加里',
+    'YEG': '🇨🇦 埃德蒙顿',
+    'YOW': '🇨🇦 渥太华',
+    'YWG': '🇨🇦 温尼伯',
+    'YHZ': '🇨🇦 哈利法克斯',
+    'HAV': '🇨🇺 哈瓦那',
+    'SJU': '🇵🇷 圣胡安',
+    'SDQ': '🇩🇴 圣多明各',
+    'PAP': '🇭🇹 太子港',
+    'KIN': '🇯🇲 金斯顿',
+    'NAS': '🇧🇸 拿骚',
+    'MBJ': '🇯🇲 蒙特哥贝'
+  };
+  function 获取机房名称(机房20018) {
+    return 机房映射[机房20018] || 机房20018;
+  }
+
+  // 城市筛选相关函数
+  const 城市筛选值 = document.getElementById('cityFilterContainer');
+  const 城市值值 = document.getElementById('cityCheckboxesContainer');
+  function 更新城市筛选() {
+    if (!城市筛选值 || !城市值值) return;
+
+    // 从测试结果中提取所有可用的城市
+    const 城市映射 = new Map();
+    测试结果列表.forEach((结果20017, 索引20016) => {
+      if (结果20017.success && 结果20017.colo) {
+        const 机房20015 = 结果20017.colo;
+        if (!城市映射.has(机房20015)) {
+          城市映射.set(机房20015, {
+            colo: 机房20015,
+            name: 获取机房名称(机房20015),
+            count: 0
+          });
+        }
+        城市映射.get(机房20015).count++;
+      }
+    });
+    if (城市映射.size === 0) {
+      城市筛选值.style.display = 'none';
+      return;
+    }
+    城市筛选值.style.display = 'block';
+    城市值值.innerHTML = '';
+
+    // 按城市名称排序
+    const 城市列表 = Array.from(城市映射.values()).sort((甲值20014, 乙值20013) => 甲值20014.name.localeCompare(乙值20013.name));
+    城市列表.forEach(城市 => {
+      const 标签 = document.createElement('label');
+      标签.style.cssText = 'display: inline-flex; align-items: center; cursor: pointer; color: #00f0ff; font-size: 0.85rem; padding: 4px 8px; background: rgba(20, 5, 50, 0.4); border: 1px solid #7aa9c4; border-radius: 4px;';
+      const 复选框20012 = document.createElement('input');
+      复选框20012.type = 'checkbox';
+      复选框20012.value = 城市.colo;
+      复选框20012.checked = true;
+      复选框20012.dataset.colo = 城市.colo;
+      复选框20012.style.cssText = 'margin-right: 6px; width: 16px; height: 16px; cursor: pointer;';
+      const 本地值20011 = document.createElement('span');
+      本地值20011.textContent = 城市.name + ' (' + 城市.count + ')';
+      标签.appendChild(复选框20012);
+      标签.appendChild(本地值20011);
+      城市值值.appendChild(标签);
+      复选框20012.addEventListener('change', 按城市筛选结果);
+    });
+
+    // 监听筛选模式变化
+    const 筛选值值 = document.querySelectorAll('input[name="cityFilterMode"]');
+    筛选值值.forEach(单选框 => {
+      单选框.addEventListener('change', function () {
+        if (this.value === 'all') {
+          // 切换到"全部城市"模式时，自动选中所有城市复选框
+          const 城市值20010 = 城市值值.querySelectorAll('input[type="checkbox"]');
+          城市值20010.forEach(本地值20009 => {
+            本地值20009.checked = true;
+            本地值20009.disabled = false;
+          });
+        }
+        按城市筛选结果();
+      });
+    });
+  }
+  function 按城市筛选结果() {
+    if (!结果列表列表 || !城市值值) return;
+    const 筛选值 = document.querySelector('input[name="cityFilterMode"]:checked')?.value || 'all';
+    const 结果项目列表 = 结果列表列表.querySelectorAll('[data-index]');
+    const 城市值 = 城市值值.querySelectorAll('input[type="checkbox"]');
+    if (筛选值 === 'fastest10') {
+      // 只选择最快的10个
+      const 值结果列表 = 测试结果列表.map((结果, 索引20008) => ({
+        result: 结果,
+        index: 索引20008
+      })).filter(项目20007 => 项目20007.result.success).sort((甲值, 乙值) => 甲值.result.latency - 乙值.result.latency).slice(0, 10);
+      const 最快索引集合 = new Set(值结果列表.map(项目20006 => 项目20006.index));
+      结果项目列表.forEach(项目20005 => {
+        const 索引 = parseInt(项目20005.dataset.index);
+        const 复选框20004 = 项目20005.querySelector('input[type="checkbox"]');
+        if (最快索引集合.has(索引)) {
+          项目20005.style.display = 'flex';
+          if (复选框20004) 复选框20004.checked = true;
+        } else {
+          项目20005.style.display = 'none';
+          if (复选框20004) 复选框20004.checked = false;
+        }
+      });
+
+      // 禁用城市复选框
+      城市值.forEach(本地值20003 => 本地值20003.disabled = true);
+    } else {
+      // 根据选中的城市筛选
+      const 已选城市列表 = new Set();
+      城市值.forEach(本地值20002 => {
+        if (本地值20002.checked) {
+          已选城市列表.add(本地值20002.value);
+        }
+      });
+
+      // 如果所有城市都被选中（或没有选中任何城市），显示所有结果
+      const 值值20001 = 城市值.length > 0 && 已选城市列表.size === 城市值.length;
+      const 值值 = 已选城市列表.size === 0;
+      结果项目列表.forEach(项目 => {
+        const 机房20000 = 项目.dataset.colo || '';
+        const 复选框 = 项目.querySelector('input[type="checkbox"]');
+        if (值值20001 || 值值 || 已选城市列表.has(机房20000)) {
+          项目.style.display = 'flex';
+          // 同步更新结果项复选框的选中状态
+          if (复选框) {
+            if (值值20001) {
+              // 所有城市都选中时，所有结果项复选框都选中
+              复选框.checked = true;
+            } else if (值值) {
+              // 没有选中任何城市时，所有结果项复选框都取消选中
+              复选框.checked = false;
+            } else {
+              // 根据城市选择状态同步复选框
+              复选框.checked = 已选城市列表.has(机房20000);
+            }
+          }
+        } else {
+          项目.style.display = 'none';
+          // 取消选中隐藏的结果项复选框
+          if (复选框) {
+            复选框.checked = false;
+          }
+        }
+      });
+
+      // 启用城市复选框
+      城市值.forEach(本地值 => 本地值.disabled = false);
+    }
+  }
+  async function 测试延迟(主机, 端口, 信号) {
+    const 超时 = 8000;
+    let 机房 = '';
+    let 测试网址 = '';
+    try {
+      const 控制器 = new AbortController();
+      const 超时标识 = setTimeout(() => 控制器.abort(), 超时);
+      if (信号) {
+        信号.addEventListener('abort', () => 控制器.abort());
+      }
+      const 清理主机 = 主机.replace(/^\\[|\\]$/g, '');
+      const 十六进制地址 = 地址转十六进制(清理主机);
+      const 测试域名 = 十六进制地址 ? 十六进制地址 + '.nip.lfree.org' : 清理主机 + '.nip.lfree.org';
+      测试网址 = 'https://' + 测试域名 + ':' + 端口 + '/';
+      console.log('[LatencyTest] Testing:', 测试网址, 'Original:', 主机 + ':' + 端口, 'HexIP:', 十六进制地址);
+      const 首次开始 = Date.now();
+      const 响应1 = await fetch(测试网址, {
+        signal: 控制器.signal
+      });
+      const 首次值 = Date.now() - 首次开始;
+      if (!响应1.ok) {
+        clearTimeout(超时标识);
+        return {
+          success: false,
+          latency: 首次值,
+          error: 'HTTP ' + 响应1.status + ' ' + 响应1.statusText,
+          colo: '',
+          testUrl: 测试网址
+        };
+      }
+      try {
+        const 文本 = await 响应1.text();
+        console.log('[LatencyTest] Response body:', 文本.substring(0, 200));
+        const 数据 = JSON.parse(文本);
+        if (数据.colo) {
+          机房 = 数据.colo;
+        }
+      } catch (事件值) {
+        console.log('[LatencyTest] Parse error:', 事件值.message);
+      }
+      const 值开始 = Date.now();
+      const 响应2 = await fetch(测试网址, {
+        signal: 控制器.signal
+      });
+      await 响应2.text();
+      const 延迟 = Date.now() - 值开始;
+      clearTimeout(超时标识);
+      console.log('[LatencyTest] First:', 首次值 + 'ms (DNS+TLS+RTT)', 'Second:', 延迟 + 'ms (RTT only)');
+      return {
+        success: true,
+        latency: 延迟,
+        colo: 机房,
+        testUrl: 测试网址
+      };
+    } catch (错误) {
+      const 错误消息 = 错误.name === 'AbortError' ? '${是否值236 ? 'زمان تمام شد' : '超时'}' : 错误.message;
+      console.log('[LatencyTest] Error:', 错误消息, 'URL:', 测试网址);
+      return {
+        success: false,
+        latency: -1,
+        error: 错误消息,
+        colo: '',
+        testUrl: 测试网址
+      };
+    }
+  }
+});
+</script>
+    </body>
+    </html>`;
+  return new Response(值页面, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8'
+    }
+  });
+}
+async function 解析木马头部(缓冲234, 本地值233) {
+  const 字节 = 处理值值8数组(缓冲234);
+  const 密码值井号 = 传输路径 || 本地值233;
+  const 值224密码 = await 处理值224井号(密码值井号);
+  if (字节.byteLength < 56) {
+    return {
+      hasError: true,
+      message: "invalid " + atob('dHJvamFu') + " data - too short"
+    };
+  }
+  let 值值索引 = 56;
+  if (字节[56] !== 0x0d || 字节[57] !== 0x0a) {
+    return {
+      hasError: true,
+      message: "invalid " + atob('dHJvamFu') + " header format (missing CR LF)"
+    };
+  }
+  const 密码232 = 共享解码器.decode(字节.subarray(0, 值值索引));
+  if (密码232 !== 值224密码) {
+    return {
+      hasError: true,
+      message: "invalid " + atob('dHJvamFu') + " password"
+    };
+  }
+  const 代理5数据缓冲 = 字节.subarray(值值索引 + 2);
+  if (代理5数据缓冲.byteLength < 6) {
+    return {
+      hasError: true,
+      message: atob('aW52YWxpZCBTT0NLUzUgcmVxdWVzdCBkYXRh')
+    };
+  }
+  const 视图231 = new DataView(代理5数据缓冲.buffer, 代理5数据缓冲.byteOffset, 代理5数据缓冲.byteLength);
+  const 命令230 = 视图231.getUint8(0);
+  if (命令230 !== 1) {
+    return {
+      hasError: true,
+      message: "unsupported command, only TCP (CONNECT) is allowed"
+    };
+  }
+  const 本地值229 = 视图231.getUint8(1);
+  let 地址长度 = 0;
+  let 地址索引228 = 2;
+  let 地址227 = "";
+  switch (本地值229) {
+    case 1:
+      地址长度 = 4;
+      地址227 = 代理5数据缓冲.subarray(地址索引228, 地址索引228 + 地址长度).join(".");
+      break;
+    case 3:
+      地址长度 = 代理5数据缓冲[地址索引228];
+      地址索引228 += 1;
+      地址227 = 共享解码器.decode(代理5数据缓冲.subarray(地址索引228, 地址索引228 + 地址长度));
+      break;
+    case 4:
+      地址长度 = 16;
+      const 数据视图 = new DataView(代理5数据缓冲.buffer, 代理5数据缓冲.byteOffset + 地址索引228, 地址长度);
+      const 值6 = [];
+      for (let 索引值226 = 0; 索引值226 < 8; 索引值226++) {
+        值6.push(数据视图.getUint16(索引值226 * 2).toString(16));
+      }
+      地址227 = 值6.join(":");
+      break;
+    default:
+      return {
+        hasError: true,
+        message: `invalid addressType is ${本地值229}`
+      };
+  }
+  if (!地址227) {
+    return {
+      hasError: true,
+      message: `address is empty, addressType is ${本地值229}`
+    };
+  }
+  const 端口索引225 = 地址索引228 + 地址长度;
+  const 端口远程 = new DataView(代理5数据缓冲.buffer, 代理5数据缓冲.byteOffset + 端口索引225, 2).getUint16(0);
+  return {
+    hasError: false,
+    addressRemote: 地址227,
+    addressType: 本地值229,
+    port: 端口远程,
+    hostname: 地址227,
+    rawClientData: 代理5数据缓冲.subarray(端口索引225 + 4)
+  };
+}
+async function 处理值224井号(文本224) {
+  const 编码器 = new TextEncoder();
+  const 数据223 = 编码器.encode(文本224);
+  const 本地值222 = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+  let 头部游标 = [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4];
+  const 消息长度 = 数据223.length;
+  const 值长度221 = 消息长度 * 8;
+  const 值长度220 = Math.ceil((消息长度 + 9) / 64) * 64;
+  const 本地值219 = new Uint8Array(值长度220);
+  本地值219.set(数据223);
+  本地值219[消息长度] = 0x80;
+  const 视图 = new DataView(本地值219.buffer);
+  视图.setUint32(值长度220 - 4, 值长度221, false);
+  for (let 块218 = 0; 块218 < 值长度220; 块218 += 64) {
+    const 写入器包装 = new Uint32Array(64);
+    for (let 索引值217 = 0; 索引值217 < 16; 索引值217++) {
+      写入器包装[索引值217] = 视图.getUint32(块218 + 索引值217 * 4, false);
+    }
+    for (let 索引值216 = 16; 索引值216 < 64; 索引值216++) {
+      const 值0215 = 处理值值200(写入器包装[索引值216 - 15], 7) ^ 处理值值200(写入器包装[索引值216 - 15], 18) ^ 写入器包装[索引值216 - 15] >>> 3;
+      const 值1214 = 处理值值200(写入器包装[索引值216 - 2], 17) ^ 处理值值200(写入器包装[索引值216 - 2], 19) ^ 写入器包装[索引值216 - 2] >>> 10;
+      写入器包装[索引值216] = 写入器包装[索引值216 - 16] + 值0215 + 写入器包装[索引值216 - 7] + 值1214 >>> 0;
+    }
+    let [甲值213, 乙值, 丙值212, 丁值211, 事件值210, 表单值, 本地值209, 头值208] = 头部游标;
+    for (let 索引值207 = 0; 索引值207 < 64; 索引值207++) {
+      const 值1206 = 处理值值200(事件值210, 6) ^ 处理值值200(事件值210, 11) ^ 处理值值200(事件值210, 25);
+      const 本地值205 = 事件值210 & 表单值 ^ ~事件值210 & 本地值209;
+      const 值1 = 头值208 + 值1206 + 本地值205 + 本地值222[索引值207] + 写入器包装[索引值207] >>> 0;
+      const 值0 = 处理值值200(甲值213, 2) ^ 处理值值200(甲值213, 13) ^ 处理值值200(甲值213, 22);
+      const 本地值204 = 甲值213 & 乙值 ^ 甲值213 & 丙值212 ^ 乙值 & 丙值212;
+      const 值2203 = 值0 + 本地值204 >>> 0;
+      头值208 = 本地值209;
+      本地值209 = 表单值;
+      表单值 = 事件值210;
+      事件值210 = 丁值211 + 值1 >>> 0;
+      丁值211 = 丙值212;
+      丙值212 = 乙值;
+      乙值 = 甲值213;
+      甲值213 = 值1 + 值2203 >>> 0;
+    }
+    头部游标[0] = 头部游标[0] + 甲值213 >>> 0;
+    头部游标[1] = 头部游标[1] + 乙值 >>> 0;
+    头部游标[2] = 头部游标[2] + 丙值212 >>> 0;
+    头部游标[3] = 头部游标[3] + 丁值211 >>> 0;
+    头部游标[4] = 头部游标[4] + 事件值210 >>> 0;
+    头部游标[5] = 头部游标[5] + 表单值 >>> 0;
+    头部游标[6] = 头部游标[6] + 本地值209 >>> 0;
+    头部游标[7] = 头部游标[7] + 头值208 >>> 0;
+  }
+  const 结果202 = [];
+  for (let 索引值201 = 0; 索引值201 < 7; 索引值201++) {
+    结果202.push((头部游标[索引值201] >>> 24 & 0xff).toString(16).padStart(2, '0'), (头部游标[索引值201] >>> 16 & 0xff).toString(16).padStart(2, '0'), (头部游标[索引值201] >>> 8 & 0xff).toString(16).padStart(2, '0'), (头部游标[索引值201] & 0xff).toString(16).padStart(2, '0'));
+  }
+  return 结果202.join('');
+}
+function 处理值值200(值199, 本地值198) {
+  return 值199 >>> 本地值198 | 值199 << 32 - 本地值198;
+}
+let 值值197 = 0;
+const 值超文本缓冲大小 = 128 * 1024;
+const 连接超时值 = 5000;
+const 值超时值 = 45000;
+const 上限值196 = 2;
+const 上限值 = 32;
+const 叉HTTP霍夫曼码长 = [
+13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28,
+	28, 28, 28, 28, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+	6, 10, 10, 12, 13, 6, 8, 11, 10, 10, 8, 11, 8, 6, 6, 6,
+	5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 7, 8, 15, 6, 12, 10,
+	13, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+	7, 7, 7, 7, 7, 7, 7, 7, 8, 7, 8, 13, 19, 13, 14, 6,
+	15, 5, 6, 5, 6, 5, 6, 6, 6, 5, 7, 7, 6, 6, 6, 5,
+	6, 7, 6, 5, 5, 6, 7, 7, 7, 7, 7, 15, 11, 14, 13, 28,
+	20, 22, 20, 20, 22, 22, 22, 23, 22, 23, 23, 23, 23, 23, 24, 23,
+	24, 24, 22, 23, 24, 23, 23, 23, 23, 21, 22, 23, 22, 23, 23, 24,
+	22, 21, 20, 22, 22, 23, 23, 21, 23, 22, 22, 24, 21, 22, 23, 23,
+	21, 21, 22, 21, 23, 22, 23, 23, 20, 22, 22, 22, 23, 22, 22, 23,
+	26, 26, 20, 19, 22, 23, 22, 25, 26, 26, 26, 27, 27, 26, 24, 25,
+	19, 21, 26, 27, 27, 26, 27, 24, 21, 21, 26, 26, 28, 27, 27, 27,
+	20, 24, 20, 21, 22, 21, 21, 23, 22, 22, 25, 25, 24, 24, 26, 23,
+	26, 27, 26, 26, 27, 27, 27, 27, 27, 28, 27, 27, 27, 27, 27, 26,
+	30
 ];
-const ipGeoCache = new Map();
-
-function validateNameStrategy(strategy) {
-    if (!strategy) return { valid: true, unknownTags: [] };
-    const tagPattern = /\{([A-Za-z]+)\}/g;
-    let match;
-    let unknownTags = [];
-    while ((match = tagPattern.exec(strategy)) !== null) {
-        let tag = match[1].toUpperCase();
-        if (!VALID_NAME_TAGS.includes(tag)) unknownTags.push(match[1]);
-    }
-    return { valid: unknownTags.length === 0, unknownTags };
+// xhttp 抗指纹填充：从 UUID 派生隐蔽的头名/键名，与订阅侧 extra 约定一致
+function 获取叉HTTP填充标识(标识串) {
+  return { 头: 标识串.slice(1, 7), 键: '_' + 标识串.slice(25, 31) };
 }
-
-async function preloadIpFlags(profiles, hostNames) {
-    let uniqueIps = new Set();
-    profiles.forEach((p) => {
-        hostNames.forEach((h) => {
-            getCleanIps(h, p.cleanIp).forEach((ip) => uniqueIps.add(ip));
-        });
-        if (p.proxyIp) {
-            getProxyIpsArray(p.proxyIp).forEach((ip) => uniqueIps.add(ip));
-        }
-    });
-    if (sysConfig.backupRelay) {
-        getProxyIpsArray(sysConfig.backupRelay).forEach((ip) =>
-            uniqueIps.add(ip),
-        );
-    }
-    if (sysConfig.customRelay) {
-        getProxyIpsArray(sysConfig.customRelay).forEach((ip) =>
-            uniqueIps.add(ip),
-        );
-    }
-
-    let uncached = Array.from(uniqueIps).filter((ip) => !ipGeoCache.has(ip));
-    for (let i = 0; i < uncached.length; i += 100) {
-        let batch = uncached.slice(i, i + 100);
-        let queries = batch.map((ip) => {
-            let clean = ip
-                .split(":")[0]
-                .replace(/[\[\]]/g, "")
-                .split("#")[0]
-                .trim();
-            return {
-                query: clean,
-                fields: "status,country,countryCode,city,isp,org",
-            };
-        });
-        try {
-            const res = await fetchT(
-                "http://ip-api.com/batch?fields=status,country,countryCode,city,isp,org",
-                {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(queries),
-                },
-            );
-            const results = await res.json();
-            batch.forEach((ip, idx) => {
-                let data = results[idx];
-                if (data && data.status === "success") {
-                    const codePoints = data.countryCode
-                        .toUpperCase()
-                        .split("")
-                        .map((char) => 127397 + char.charCodeAt());
-                    ipGeoCache.set(ip, {
-                        flag: String.fromCodePoint(...codePoints),
-                        country: data.country || "Unknown",
-                        countryCode: data.countryCode || "",
-                        city: data.city || "",
-                        isp: data.isp || data.org || "",
-                    });
-                } else {
-                    ipGeoCache.set(ip, {
-                        flag: "🌐",
-                        country: "Unknown",
-                        countryCode: "",
-                        city: "",
-                        isp: "",
-                    });
-                }
-            });
-        } catch (e) {
-            batch.forEach((ip) => {
-                if (!ipGeoCache.has(ip)) {
-                    ipGeoCache.set(ip, {
-                        flag: "🌐",
-                        country: "Unknown",
-                        countryCode: "",
-                        city: "",
-                        isp: "",
-                    });
-                }
-            });
-        }
-    }
+function 计算叉HTTP霍夫曼字节长度(字符串) {
+  const 字节 = new TextEncoder().encode(字符串);
+  let 总位数 = 0;
+  for (let 索引 = 0; 索引 < 字节.length; 索引++) 总位数 += 叉HTTP霍夫曼码长[字节[索引]];
+  return Math.ceil(总位数 / 8);
 }
-
-function getEmojiFlag(ip) {
-    if (!ip) return "🌐";
-    let clean = ip
-        .split(":")[0]
-        .replace(/[\[\]]/g, "")
-        .split("#")[0]
-        .trim();
-    let geo = ipGeoCache.get(ip) || ipGeoCache.get(clean);
-    return geo ? geo.flag : "🌐";
-}
-
-function getGeoInfo(ip) {
-    if (!ip)
-        return {
-            flag: "🌐",
-            country: "Unknown",
-            countryCode: "",
-            city: "",
-            isp: "",
-        };
-    let clean = ip
-        .split(":")[0]
-        .replace(/[\[\]]/g, "")
-        .split("#")[0]
-        .trim();
-    return (
-        ipGeoCache.get(ip) ||
-        ipGeoCache.get(clean) || {
-            flag: "🌐",
-            country: "Unknown",
-            countryCode: "",
-            city: "",
-            isp: "",
-        }
-    );
-}
-
-async function fetchIpGeoData(ip) {
-    if (!ip) return null;
-    let clean = ip
-        .split(":")[0]
-        .replace(/[\[\]]/g, "")
-        .split("#")[0]
-        .trim();
+function 提取叉HTTP填充值(请求, 填充头, 填充键) {
+  const 头值 = 请求.headers.get(填充头);
+  if (头值) {
     try {
-        const res = await fetchT(
-            `http://ip-api.com/json/${clean}?fields=status,country,countryCode,city,isp,org`,
-        );
-        const data = await res.json();
-        if (data && data.status === "success") {
-            const codePoints = data.countryCode
-                .toUpperCase()
-                .split("")
-                .map((char) => 127397 + char.charCodeAt());
-            return {
-                flag: String.fromCodePoint(...codePoints),
-                country: data.country || "Unknown",
-                countryCode: data.countryCode || "",
-                city: data.city || "",
-                isp: data.isp || data.org || "",
-            };
+      const 解析 = new URL(头值, 'https://x.invalid');
+      const 查询值 = 解析.searchParams.get(填充键);
+      if (查询值) return 查询值;
+    } catch (忽略) {}
+    return 头值;
+  }
+  try {
+    return new URL(请求.url).searchParams.get(填充键) || '';
+  } catch (忽略) {
+    return '';
+  }
+}
+function 校验叉HTTP填充(请求, 填充头, 填充键) {
+  const 填充 = 提取叉HTTP填充值(请求, 填充头, 填充键);
+  if (!填充) return true;
+  const 长度 = 计算叉HTTP霍夫曼字节长度(填充);
+  return 长度 >= 98 && 长度 <= 1002;
+}
+const 叉HTTP填充字符集 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+function 生成叉HTTP填充串(长度) {
+  const 字符集长度 = 叉HTTP填充字符集.length;
+  let 结果 = '';
+  for (let 索引 = 0; 索引 < 长度; 索引++) 结果 += 叉HTTP填充字符集[Math.floor(Math.random() * 字符集长度)];
+  return 结果;
+}
+function 处理扩展超文本值195(本地值194) {
+  return new Promise(结果值193 => setTimeout(结果值193, 本地值194));
+}
+function 验证唯一标识扩展超文本(标识192, 唯一标识191) {
+  for (let 索引190 = 0; 索引190 < 16; 索引190++) {
+    if (标识192[索引190] !== 唯一标识191[索引190]) {
+      return false;
+    }
+  }
+  return true;
+}
+class 扩展超文本计数器 {
+  #total;
+  constructor() {
+    this.#total = 0;
+  }
+  get() {
+    return this.#total;
+  }
+  add(大小189) {
+    this.#total += 大小189;
+  }
+}
+function 处理值值值(首次, ...本地值188) {
+  let 长度 = 首次.length;
+  for (let 甲值187 of 本地值188) {
+    长度 += 甲值187.length;
+  }
+  const 结果值186 = new 首次.constructor(长度);
+  结果值186.set(首次, 0);
+  长度 = 首次.length;
+  for (let 甲值185 of 本地值188) {
+    结果值186.set(甲值185, 长度);
+    长度 += 甲值185.length;
+  }
+  return 结果值186;
+}
+function 解析唯一标识扩展超文本(唯一标识184) {
+  唯一标识184 = 唯一标识184.replaceAll('-', '');
+  const 结果值183 = [];
+  for (let 索引182 = 0; 索引182 < 16; 索引182++) {
+    const 取值181 = parseInt(唯一标识184.substr(索引182 * 2, 2), 16);
+    结果值183.push(取值181);
+  }
+  return 结果值183;
+}
+function 获取扩展超文本缓冲(大小) {
+  return new Uint8Array(new ArrayBuffer(大小 || 值超文本缓冲大小));
+}
+async function 读取扩展超文本头部(本地值180, 唯一标识字符串) {
+  const 读取器179 = 本地值180.getReader({
+    mode: 'byob'
+  });
+  try {
+    let 结果值178 = await 读取器179.readAtLeast(1 + 16 + 1, 获取扩展超文本缓冲());
+    let 本地值177 = 0;
+    let 索引 = 0;
+    let 缓存 = 结果值178.value;
+    本地值177 += 结果值178.value.length;
+    const 本地值176 = 缓存[0];
+    const 标识175 = 缓存.slice(1, 1 + 16);
+    const 唯一标识174 = 解析唯一标识扩展超文本(唯一标识字符串);
+    if (!验证唯一标识扩展超文本(标识175, 唯一标识174)) {
+      return `invalid UUID`;
+    }
+    const 值长度173 = 缓存[1 + 16];
+    const 地址值1 = 1 + 16 + 1 + 值长度173 + 1 + 2 + 1;
+    if (地址值1 + 1 > 本地值177) {
+      if (结果值178.done) {
+        return `header too short`;
+      }
+      索引 = 地址值1 + 1 - 本地值177;
+      结果值178 = await 读取器179.readAtLeast(索引, 获取扩展超文本缓冲());
+      本地值177 += 结果值178.value.length;
+      缓存 = 处理值值值(缓存, 结果值178.value);
+    }
+    const 命令 = 缓存[1 + 16 + 1 + 值长度173];
+    if (命令 !== 1) {
+      return `unsupported command: ${命令}`;
+    }
+    const 端口172 = (缓存[地址值1 - 1 - 2] << 8) + 缓存[地址值1 - 1 - 1];
+    const 本地值171 = 缓存[地址值1 - 1];
+    let 头部长度 = -1;
+    if (本地值171 === 地址类型_四版) {
+      头部长度 = 地址值1 + 4;
+    } else if (本地值171 === 地址类型_六版) {
+      头部长度 = 地址值1 + 16;
+    } else if (本地值171 === 地址类型_网址) {
+      头部长度 = 地址值1 + 1 + 缓存[地址值1];
+    }
+    if (头部长度 < 0) {
+      return 'read address type failed';
+    }
+    索引 = 头部长度 - 本地值177;
+    if (索引 > 0) {
+      if (结果值178.done) {
+        return `read address failed`;
+      }
+      结果值178 = await 读取器179.readAtLeast(索引, 获取扩展超文本缓冲());
+      本地值177 += 结果值178.value.length;
+      缓存 = 处理值值值(缓存, 结果值178.value);
+    }
+    let 主机名170 = '';
+    索引 = 地址值1;
+    switch (本地值171) {
+      case 地址类型_四版:
+        主机名170 = 缓存.slice(索引, 索引 + 4).join('.');
+        break;
+      case 地址类型_网址:
+        主机名170 = new TextDecoder().decode(缓存.slice(索引 + 1, 索引 + 1 + 缓存[索引]));
+        break;
+      case 地址类型_六版:
+        主机名170 = 缓存.slice(索引, 索引 + 16).reduce((字符串值, 值2169, 值2, 甲值) => 值2 % 2 ? 字符串值.concat(((甲值[值2 - 1] << 8) + 值2169).toString(16)) : 字符串值, []).join(':');
+        break;
+    }
+    if (主机名170.length < 1) {
+      return 'failed to parse hostname';
+    }
+    const 数据 = 缓存.slice(头部长度);
+    return {
+      hostname: 主机名170,
+      port: 端口172,
+      data: 数据,
+      resp: new Uint8Array([本地值176, 0]),
+      reader: 读取器179,
+      done: 结果值178.done
+    };
+  } catch (错误168) {
+    try {
+      读取器179.releaseLock();
+    } catch (忽略值167) {}
+    throw 错误168;
+  }
+}
+async function 处理值值远程扩展超文本(计数器166, 写入器165, 本地值164) {
+  async function 处理值值(丁值) {
+    if (!丁值 || 丁值.length === 0) {
+      return;
+    }
+    计数器166.add(丁值.length);
+    try {
+      await 写入器165.write(丁值);
+    } catch (错误163) {
+      throw 错误163;
+    }
+  }
+  try {
+    await 处理值值(本地值164.data);
+    let 块数量162 = 0;
+    while (!本地值164.done) {
+      const 结果值161 = await 本地值164.reader.read(获取扩展超文本缓冲());
+      if (结果值161.done) break;
+      await 处理值值(结果值161.value);
+      本地值164.done = 结果值161.done;
+      块数量162++;
+      if (块数量162 % 10 === 0) {
+        await 处理扩展超文本值195(0);
+      }
+      if (!结果值161.value || 结果值161.value.length === 0) {
+        await 处理扩展超文本值195(2);
+      }
+    }
+  } catch (错误160) {
+    throw 错误160;
+  }
+}
+function 创建扩展超文本值159(本地值158, 本地值157) {
+  const 计数器156 = new 扩展超文本计数器();
+  const 写入器155 = 本地值157.getWriter();
+  const 本地值154 = (async () => {
+    try {
+      await 处理值值远程扩展超文本(计数器156, 写入器155, 本地值158);
+    } catch (错误153) {
+      throw 错误153;
+    } finally {
+      try {
+        await 写入器155.close();
+      } catch (错误152) {}
+    }
+  })();
+  return {
+    counter: 计数器156,
+    done: 本地值154,
+    abort: () => {
+      try {
+        写入器155.abort();
+      } catch (忽略值151) {}
+    }
+  };
+}
+function 创建扩展超文本值(本地值150, 远程值) {
+  const 计数器 = new 扩展超文本计数器();
+  let 流;
+  const 本地值149 = new Promise((本地值148, 本地值147) => {
+    流 = new TransformStream({
+      start(控制器146) {
+        计数器.add(本地值150.length);
+        控制器146.enqueue(本地值150);
+      },
+      transform(块, 控制器145) {
+        计数器.add(块.length);
+        控制器145.enqueue(块);
+      },
+      cancel(本地值144) {
+        本地值147(`download cancelled: ${本地值144}`);
+      }
+    }, null, new ByteLengthQueuingStrategy({
+      highWaterMark: 值超文本缓冲大小
+    }));
+    let 值值143 = Date.now();
+    const 值计时器 = setInterval(() => {
+      if (Date.now() - 值值143 > 值超时值) {
+        try {
+          流.writable.abort?.('idle timeout');
+        } catch (忽略值142) {}
+        clearInterval(值计时器);
+        本地值147('idle timeout');
+      }
+    }, 5000);
+    const 读取器 = 远程值.getReader();
+    const 写入器 = 流.writable.getWriter();
+    ;
+    (async () => {
+      try {
+        let 块数量 = 0;
+        while (true) {
+          const 结果值141 = await 读取器.read();
+          if (结果值141.done) {
+            break;
+          }
+          值值143 = Date.now();
+          await 写入器.write(结果值141.value);
+          块数量++;
+          if (块数量 % 5 === 0) {
+            await 处理扩展超文本值195(0);
+          }
         }
-    } catch (e) {}
+        await 写入器.close();
+        本地值148();
+      } catch (错误140) {
+        本地值147(错误140);
+      } finally {
+        try {
+          读取器.releaseLock();
+        } catch (忽略值139) {}
+        try {
+          写入器.releaseLock();
+        } catch (忽略值138) {}
+        clearInterval(值计时器);
+      }
+    })();
+  });
+  return {
+    readable: 流.readable,
+    counter: 计数器,
+    done: 本地值149,
+    abort: () => {
+      try {
+        流.readable.cancel();
+      } catch (忽略值137) {}
+      try {
+        流.writable.abort();
+      } catch (忽略值136) {}
+    }
+  };
+}
+// 用一个远程套接字装配上下行器：uploader 负责写 vless 首包与后续上行，downloader 回灌 resp+下行
+function 装配扩展超文本连接(首包, 远程套接字) {
+  const uploader = 创建扩展超文本值159(首包, 远程套接字.writable);
+  const downloader = 创建扩展超文本值(首包.resp, 远程套接字.readable);
+  return {
+    downloader,
+    uploader,
+    close: () => {
+      try {
+        远程套接字.close();
+      } catch (忽略关闭) {}
+    }
+  };
+}
+// 出站决策与 ws 的 处理值值384 对齐：接入 s（代理）、wk/rm（地区匹配备用地址）、qj（代理降级/仅走代理）
+async function 连接值远程扩展超文本(首包, 请求值扩展 = null) {
+  const 主机 = 首包.hostname;
+  const 端口 = 首包.port;
+  const 直连 = async (地址, 端口值) => 连接值套接字(地址, 端口值, 请求值扩展, 传输连接竞速数);
+  const 走代理 = async (地址, 端口值) => 处理值代理连接(地址类型_网址, 地址, 端口值, 已解析代理5配置, 请求值扩展, null);
+  // 计算回退目标：优先 p（回退地址），否则按 wk/rm 取地区匹配备用地址
+  const 取回退目标 = async () => {
+    if (回退地址 && 回退地址.trim()) {
+      const 已解析 = 解析地址值端口(回退地址);
+      return {
+        address: 已解析.address,
+        port: 已解析.port || 端口
+      };
+    }
+    const 备用 = await 获取值备用地址(当前工作器地区, 启用地区匹配);
+    return 备用 ? {
+      address: 备用.domain,
+      port: 备用.port
+    } : {
+      address: 主机,
+      port: 端口
+    };
+  };
+  const 首跳走代理 = 仅走代理 && 是否代理已启用 ? true : 启用代理降级 ? false : 是否代理已启用;
+  try {
+    const 套接字 = 首跳走代理 ? await 走代理(主机, 端口) : await 直连(主机, 端口);
+    return 装配扩展超文本连接(首包, 套接字);
+  } catch (首跳错误) {
+    // 只走代理：首跳失败不回落直连，避免出口 IP 泄漏
+    if (仅走代理 && 是否代理已启用) return null;
+    try {
+      if (启用代理降级 && 是否代理已启用) {
+        try {
+          const 代理套接字 = await 走代理(主机, 端口);
+          return 装配扩展超文本连接(首包, 代理套接字);
+        } catch (代理错误) {
+          const 回退 = await 取回退目标();
+          const 回退套接字 = await 直连(回退.address, 回退.port);
+          return 装配扩展超文本连接(首包, 回退套接字);
+        }
+      }
+      const 回退 = await 取回退目标();
+      const 回退套接字 = 是否代理已启用 ? await 走代理(回退.address, 回退.port) : await 直连(回退.address, 回退.port);
+      return 装配扩展超文本连接(首包, 回退套接字);
+    } catch (回退错误) {
+      return null;
+    }
+  }
+}
+async function 处理扩展超文本客户端(主体128, 唯一标识, 请求值扩展 = null) {
+  if (值值197 >= 上限值) {
+    return new Response('Too many connections', {
+      status: 429
+    });
+  }
+  值值197++;
+  let 本地值127 = false;
+  const 本地值126 = () => {
+    if (!本地值127) {
+      值值197 = Math.max(0, 值值197 - 1);
+      本地值127 = true;
+    }
+  };
+  try {
+    const 本地值125 = await 读取扩展超文本头部(主体128, 唯一标识);
+    if (typeof 本地值125 !== 'object' || !本地值125) {
+      return null;
+    }
+    const 远程连接 = await 连接值远程扩展超文本(本地值125, 请求值扩展);
+    if (远程连接 === null) {
+      return null;
+    }
+    const 连接值 = Promise.race([(async () => {
+      try {
+        await 远程连接.downloader.done;
+      } catch (错误124) {}
+    })(), (async () => {
+      try {
+        await 远程连接.uploader.done;
+      } catch (错误123) {}
+    })(), 处理扩展超文本值195(值超时值).then(() => {})]).finally(() => {
+      try {
+        远程连接.close();
+      } catch (忽略值122) {}
+      try {
+        远程连接.downloader.abort();
+      } catch (忽略值121) {}
+      try {
+        远程连接.uploader.abort();
+      } catch (忽略值) {}
+      本地值126();
+    });
+    return {
+      readable: 远程连接.downloader.readable,
+      closed: 连接值
+    };
+  } catch (错误120) {
+    本地值126();
     return null;
+  }
 }
-
-async function resolveUserProxyIpGeo(user) {
-    if (!user.proxyIp) {
-        user.proxyIpGeo = null;
-        return;
-    }
-    let pips = getProxyIpsArray(user.proxyIp);
-    if (pips.length === 0) {
-        user.proxyIpGeo = null;
-        return;
-    }
-    let geoData = await fetchIpGeoData(pips[0]);
-    user.proxyIpGeo = geoData || {
-        flag: "🌐",
-        country: "Unknown",
-        countryCode: "",
-        city: "",
-        isp: "",
-    };
+async function 处理扩展超文本值(请求119) {
+  try {
+    return await 处理扩展超文本客户端(请求119.body, 认证令牌, 请求119.fetcher);
+  } catch (错误118) {
+    return null;
+  }
 }
-
-function getConfigName(
-    type,
-    profileName,
-    port,
-    hostName,
-    ip,
-    proxyIp = null,
-    configIndex = 0,
-    ipName = "",
-    isDirect = false
-) {
-    let prefix = sysConfig.namePrefix || "Core";
-    let strategy = sysConfig.nameStrategy || "default";
-    let cleanName = profileName === "Default" ? "" : `-${profileName}`;
-    let typeLab = type === "alpha" ? "V" : "T";
-
-    if (strategy.includes("{") && strategy.includes("}")) {
-        let lookupIp = proxyIp || ip;
-        let geoInfo = getGeoInfo(lookupIp);
-        let protoLab = type === "alpha" ? "VLESS" : "Trojan";
-        let now = new Date();
-        let dateStr =
-            now.getFullYear() +
-            "-" +
-            String(now.getMonth() + 1).padStart(2, "0") +
-            "-" +
-            String(now.getDate()).padStart(2, "0");
-        let workerName =
-            sysConfig.cfWorkerName || sysConfig.name || hostName || "";
-        let flagToUse = isDirect ? "☁️" : geoInfo.flag;
-        let resName = strategy
-            .replace(/{FLAG}/g, flagToUse)
-            .replace(/{COUNTRY}/g, geoInfo.country)
-            .replace(/{CITY}/g, geoInfo.city)
-            .replace(/{ISP}/g, geoInfo.isp)
-            .replace(/{PROTOCOL}/g, protoLab)
-            .replace(/{USER}/g, profileName)
-            .replace(/{PORT}/g, port)
-            .replace(/{PREFIX}/g, prefix)
-            .replace(/{IP}/g, ip || "")
-            .replace(/{IP_NAME}/g, ipName || "")
-            .replace(/{HOST}/g, hostName || "")
-            .replace(/{DATE}/g, dateStr)
-            .replace(/{INDEX}/g, String(configIndex))
-            .replace(/{WORKER}/g, workerName);
-        return resName;
-    }
-
-    if (strategy === "type-user-port") {
-        return `${type === "alpha" ? "vl" + "ess" : "tro" + "jan"}-${profileName}-${port}`;
-    } else if (strategy === "user-port") {
-        return `${profileName}-${port}`;
-    } else if (strategy === "host-port-user") {
-        return `${hostName}-${port}${cleanName}`;
-    } else if (strategy === "prefix-user-port") {
-        return `${prefix}${cleanName}-${port}`;
-    } else if (strategy === "ip") {
-        return ip || "unknown";
-    } else {
-        // "default"
-        return `${typeLab}-Core-${port}${cleanName}`;
-    }
-}
-
-function calcEffectiveIps(ips, maxCfg, effectiveMode, effectivePorts, pipsCount = 1) {
-    if (!maxCfg) return ips;
-    let protoCount = effectiveMode === "both" ? 2 : 1;
-    let portCount = effectivePorts.length;
-    let directMultiplier = sysConfig.enableDirectConfigs ? 2 : 1;
-    let multiplier = protoCount * portCount * directMultiplier * Math.max(1, pipsCount);
-    let neededIps = Math.max(1, Math.floor(maxCfg / multiplier));
-    return ips.slice(0, neededIps);
-}
-
-function getProfileHostNames(hostName, profile) {
-    let primaryHost =
-        profile && profile.userPanelUrl ? profile.userPanelUrl : hostName;
-    let names = [];
-    if (profile && profile.userNodes && profile.userNodes.trim()) {
-        names.push(
-            ...profile.userNodes
-                .split(/[\r\n,;]+/)
-                .map((s) => linkedPanelHost(s.trim()))
-                .filter(Boolean),
-        );
-    } else {
-        names.push(linkedPanelHost(primaryHost));
-        names.push(...getGlobalNodeHosts());
-    }
-    return [...new Set(names)];
-}
-
-function getEffectiveNat64(userNat64) {
-    let parts = [];
-    if (userNat64)
-        parts.push(
-            ...userNat64
-                .split(/[\r\n,;]+/)
-                .map((s) => s.trim())
-                .filter(Boolean),
-        );
-    if (sysConfig.nat64Prefix)
-        parts.push(
-            ...sysConfig.nat64Prefix
-                .split(/[\r\n,;]+/)
-                .map((s) => s.trim())
-                .filter(Boolean),
-        );
-    return [...new Set(parts)].join(",") || null;
-}
-
-function getEffectivePips(p) {
-    let effectiveNat64 = getEffectiveNat64(p.nat64);
-    let pips = getProxyIpsWithNat64(p.proxyIp, effectiveNat64);
-    if (pips.length === 0 && sysConfig.backupRelay) {
-        pips = getProxyIpsWithNat64(sysConfig.backupRelay, effectiveNat64);
-    }
-    if (pips.length === 0 && sysConfig.customRelay) {
-        pips = getProxyIpsWithNat64(sysConfig.customRelay, effectiveNat64);
-    }
-    return pips;
-}
-
-// ─── Per-user segmentation (anti-filter fragment) + TLS mask ──────────────
-// Storage (users[] object): segMode "off"|"builder"|"manual",
-// builder fields segPackets/segLengths/segDelays/segMaxSplit,
-// manual field segManual (classic "a-b,c-d,packets" OR finalmask JSON),
-// TLS mask field tlsMask (colon-separated TLS_* cipher list).
-// All helpers are fail-open: invalid input yields null (link built plain).
-function parseSegRangeList(s, maxItems) {
-    try {
-        const items = String(s || "")
-            .split(",")
-            .map((x) => x.trim())
-            .filter(Boolean)
-            .slice(0, maxItems);
-        if (!items.length) return null;
-        for (const it of items) {
-            if (!/^\d{1,5}(-\d{1,5})?$/.test(it)) return null;
-        }
-        return items;
-    } catch (e) {
-        return null;
-    }
-}
-function resolveSegFragment(p) {
-    // { kind: 'classic', value } | { kind: 'fm', value } | null. Fail-open.
-    try {
-        if (!p) return null;
-        const mode = String(p.segMode || "off").toLowerCase();
-        if (mode === "builder") {
-            const packets = String(p.segPackets || "").trim().slice(0, 32);
-            if (!packets) return null;
-            if (
-                packets !== "tlshello" &&
-                !/^\d{1,3}-\d{1,3}$/.test(packets)
-            )
-                return null;
-            const lengths = parseSegRangeList(p.segLengths, 8);
-            const delays = parseSegRangeList(p.segDelays, 8);
-            const maxSplit = String(p.segMaxSplit ?? "").trim();
-            if (!lengths || !delays) return null;
-            if (!/^\d{1,6}$/.test(maxSplit)) return null;
-            return {
-                kind: "fm",
-                value: {
-                    tcp: [
-                        {
-                            type: "fragment",
-                            settings: { packets, lengths, delays, maxSplit },
-                        },
-                    ],
-                },
-            };
-        }
-        if (mode === "manual") {
-            const raw = String(p.segManual || "").trim().slice(0, 4000);
-            if (!raw) return null;
-            if (raw.charAt(0) === "{") {
-                let obj = null;
-                try {
-                    obj = JSON.parse(raw);
-                } catch (e) {
-                    return null;
-                }
-                if (
-                    !obj ||
-                    typeof obj !== "object" ||
-                    !Array.isArray(obj.tcp) ||
-                    obj.tcp.length === 0
-                )
-                    return null;
-                return { kind: "fm", value: { tcp: obj.tcp } };
-            }
-            if (
-                /^\d{1,5}-\d{1,5},\d{1,5}-\d{1,5},(tlshello|\d{1,3}-\d{1,3})$/.test(
-                    raw,
-                )
-            )
-                return { kind: "classic", value: raw };
-            return null;
-        }
-        return null;
-    } catch (e) {
-        return null;
-    }
-}
-function buildSegFragmentParam(p) {
-    // Returns "" or "&fragment=..." / "&fm=..." (already encoded).
-    try {
-        const r = resolveSegFragment(p);
-        if (!r) return "";
-        if (r.kind === "fm")
-            return "&fm=" + encodeURIComponent(JSON.stringify(r.value));
-        return "&fragment=" + encodeURIComponent(String(r.value));
-    } catch (e) {
-        return "";
-    }
-}
-function getSegStreamExtra(p) {
-    // Xray streamSettings object for vjson builder: { finalmask } | { fragment } | {}.
-    try {
-        const r = resolveSegFragment(p);
-        if (!r) return {};
-        if (r.kind === "fm") return { finalmask: r.value };
-        const m = String(r.value).split(",");
-        return {
-            fragment: { packets: m[2], length: m[0], interval: m[1] },
-        };
-    } catch (e) {
-        return {};
-    }
-}
-function buildTlsMaskParam(p) {
-    // Returns "" or "&cs=..." (already encoded).
-    try {
-        if (!p || !p.tlsMask) return "";
-        const v = String(p.tlsMask).trim().slice(0, 2000);
-        if (!/^(TLS_[A-Za-z0-9_]+)(:TLS_[A-Za-z0-9_]+)*$/.test(v)) return "";
-        return "&cs=" + encodeURIComponent(v);
-    } catch (e) {
-        return "";
-    }
-}
-function isSegEnabled(p) {
-    try {
-        if (!p) return false;
-        const mode = String(p.segMode || "off").toLowerCase();
-        if (mode !== "builder" && mode !== "manual") return false;
-        return buildSegFragmentParam(p) !== "";
-    } catch (e) {
-        return false;
-    }
-}
-
-// ─── Upstream VLESS URI Parser ───────────────────────────────────────
-// Parses a VLESS URI like:
-//   vless://uuid@server:port?type=ws&security=tls&sni=example.com&path=/ws#Name
-// into a structured object usable by Sing-Box, Clash, and V2Ray builders.
-function parseVlessUri(uri) {
-    if (!uri || typeof uri !== "string") return null;
-    uri = uri.trim();
-    if (!uri.startsWith("vless://")) return null;
-    try {
-        // Remove the scheme
-        let rest = uri.slice(8); // after "vless://"
-        // Split fragment (#name)
-        let fragment = "";
-        let hashIdx = rest.indexOf("#");
-        if (hashIdx !== -1) {
-            fragment = decodeURIComponent(rest.slice(hashIdx + 1));
-            rest = rest.slice(0, hashIdx);
-        }
-        // Split query string (?params)
-        let queryStr = "";
-        let qIdx = rest.indexOf("?");
-        if (qIdx !== -1) {
-            queryStr = rest.slice(qIdx + 1);
-            rest = rest.slice(0, qIdx);
-        }
-        // Parse query params
-        let params = {};
-        if (queryStr) {
-            queryStr.split("&").forEach((pair) => {
-                let [k, v] = pair.split("=");
-                if (k) params[decodeURIComponent(k)] = decodeURIComponent(v || "");
-            });
-        }
-        // Parse uuid@server:port
-        let atIdx = rest.indexOf("@");
-        if (atIdx === -1) return null;
-        let uuid = rest.slice(0, atIdx);
-        let hostPort = rest.slice(atIdx + 1);
-        let server, port;
-        // Handle IPv6 [addr]:port
-        if (hostPort.startsWith("[")) {
-            let bracketEnd = hostPort.indexOf("]");
-            server = hostPort.slice(1, bracketEnd);
-            port = parseInt(hostPort.slice(bracketEnd + 2)) || 443;
-        } else {
-            let colonIdx = hostPort.lastIndexOf(":");
-            server = hostPort.slice(0, colonIdx);
-            port = parseInt(hostPort.slice(colonIdx + 1)) || 443;
-        }
-        return {
-            uuid,
-            server,
-            port,
-            name: fragment || "Upstream",
-            security: params.security || "tls",
-            sni: params.sni || params.servername || server,
-            host: params.host || server,
-            path: params.path || "/",
-            type: params.type || "ws",
-            fp: params.fp || params["client-fingerprint"] || "random",
-            allowInsecure: params.allowInsecure === "1" || params.allowInsecure === "true",
-            pbk: params.pbk || "",
-            sid: params.sid || "",
-            flow: params.flow || "",
-            encryption: params.encryption || "none",
-            alpn: params.alpn || "",
-            mode: params.mode || "",
-            raw: uri,
-        };
-    } catch (e) {
-        return null;
-    }
-}
-
-// Convert parsed VLESS URI to a Sing-Box outbound object
-function upstreamToSingboxOb(parsed) {
-    if (!parsed) return null;
-    let ob = {
-        type: "vless",
-        tag: "🔗 " + parsed.name,
-        server: parsed.server,
-        server_port: parsed.port,
-        uuid: parsed.uuid,
-        packet_encoding: "xudp",
-        network: parsed.type || "ws",
-        tls: {
-            enabled: parsed.security === "tls" || parsed.security === "reality",
-            server_name: parsed.sni,
-            insecure: parsed.allowInsecure,
-            utls: { enabled: true, fingerprint: parsed.fp || "randomized" },
-        },
-        transport: {
-            type: parsed.type || "ws",
-            path: parsed.path || "/",
-            headers: { Host: parsed.host || parsed.sni },
-        },
-    };
-    if (parsed.flow) ob.flow = parsed.flow;
-    if (parsed.pbk) {
-        ob.tls.reality = {
-            enabled: true,
-            public_key: parsed.pbk,
-            short_id: parsed.sid || "",
-        };
-    }
-    if (parsed.alpn) ob.tls.alpn = parsed.alpn.split(",");
-    return ob;
-}
-
-// Convert parsed VLESS URI to a Clash/Mihomo proxy object (YAML-compatible)
-function upstreamToClashProxy(parsed) {
-    if (!parsed) return null;
-    let proxy = {
-        name: parsed.name,
-        type: "vless",
-        server: parsed.server,
-        port: parsed.port,
-        uuid: parsed.uuid,
-        udp: true,
-        tls: parsed.security === "tls" || parsed.security === "reality",
-        servername: parsed.sni,
-        "client-fingerprint": parsed.fp || "random",
-        "skip-cert-verify": parsed.allowInsecure,
-        network: parsed.type || "ws",
-        "ws-opts": {
-            path: parsed.path || "/",
-            headers: { Host: parsed.host || parsed.sni },
-        },
-    };
-    if (parsed.flow) proxy.flow = parsed.flow;
-    if (parsed.pbk) {
-        proxy["reality-opts"] = {
-            "public-key": parsed.pbk,
-            "short-id": parsed.sid || "",
-        };
-    }
-    if (parsed.alpn) proxy.alpn = parsed.alpn.split(",");
-    return proxy;
-}
-
-// Convert parsed VLESS URI to a V2Ray JSON outbound object
-function upstreamToV2RayOb(parsed) {
-    if (!parsed) return null;
-    let ob = {
-        tag: "🔗 " + parsed.name,
-        protocol: "vless",
-        settings: {
-            vnext: [
-                {
-                    address: parsed.server,
-                    port: parsed.port,
-                    users: [
-                        {
-                            id: parsed.uuid,
-                            encryption: parsed.encryption || "none",
-                            flow: parsed.flow || "",
-                        },
-                    ],
-                },
-            ],
-        },
-        streamSettings: {
-            network: parsed.type || "ws",
-            security: parsed.security === "tls" || parsed.security === "reality" ? "tls" : "none",
-            tlsSettings: parsed.security === "tls" ? {
-                serverName: parsed.sni,
-                allowInsecure: parsed.allowInsecure,
-                fingerprint: parsed.fp || "random",
-            } : undefined,
-            realitySettings: parsed.security === "reality" ? {
-                serverName: parsed.sni,
-                publicKey: parsed.pbk || "",
-                shortId: parsed.sid || "",
-                fingerprint: parsed.fp || "random",
-            } : undefined,
-            wsSettings: {
-                path: parsed.path || "/",
-                headers: { Host: parsed.host || parsed.sni },
-            },
-        },
-    };
-    return ob;
-}
-
-async function buildUriProfile(
-    hostName,
-    targetSub = null,
-    allowInsecure = false,
-) {
-    let ports = sysConfig.socketPorts
-        ? sysConfig.socketPorts
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-        : ["443"];
-    let reqPath = encodeURI(`/${sysConfig.apiRoute}`);
-
-    let lines = [];
-    let profiles = getAllProfiles(targetSub);
-    let allHostNames = [
-        ...new Set(profiles.flatMap((p) => getProfileHostNames(hostName, p))),
-    ];
-    await preloadIpFlags(profiles, allHostNames);
-
-    // Add fake configs
-    let fakeNames = getFakeConfigNames(targetSub);
-    fakeNames.forEach((name) => {
-        lines.push(
-            `trojan://00000000-0000-0000-0000-000000000000@127.0.0.1:1080?security=none#${encodeURIComponent(name)}`,
-        );
-    });
-
-    profiles.forEach((p) => {
-        let pips = getEffectivePips(p);
-        let effectiveMode = p.userMode || sysConfig.mode;
-        let effectivePorts = p.userPorts
-            ? p.userPorts
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
-            : ports;
-        let maxCfg = p.maxConfigs || null;
-
-        let configIndex = 0;
-        let profileHostNames = getProfileHostNames(hostName, p);
-
-        profileHostNames.forEach((hName) => {
-            let ipEntries = getCleanIpsWithNames(hName, p.cleanIp);
-            let allIps = ipEntries.map((e) => e.ip);
-            let ips = calcEffectiveIps(
-                allIps,
-                maxCfg,
-                effectiveMode,
-                effectivePorts,
-                pips.length
-            );
-            let ipNameMap = {};
-            ipEntries.forEach((e) => {
-                ipNameMap[e.ip] = e.name;
-            });
-            effectivePorts.forEach((port) => {
-                let sec = getTransportParams(port);
-                let extBase = `encryption=none&security=${sec}&sni=${hName}&fp=${sysConfig.agent}&type=ws&host=${hName}&path=${reqPath}`;
-                if (sysConfig.enableOpt2) extBase += `&pbk=enabled`;
-                extBase += `&allowInsecure=${allowInsecure ? "1" : "0"}`;
-                // Per-user segmentation (fragment/finalmask) + TLS mask.
-                try {
-                    extBase += buildSegFragmentParam(p);
-                    extBase += buildTlsMaskParam(p);
-                } catch (e) {}
-                ips.forEach((ip) => {
-                    let _pips = pips.length > 0 ? pips : [null];
-                    _pips.forEach((selectedProxyIp) => {
-                    let ipName = ipNameMap[ip] || "";
-                    let vName = getConfigName(
-                        "alpha",
-                        p.name,
-                        port,
-                        hName,
-                        ip,
-                        selectedProxyIp,
-                        configIndex,
-                        ipName,
-                    );
-                    let tName = getConfigName(
-                        "beta",
-                        p.name,
-                        port,
-                        hName,
-                        ip,
-                        selectedProxyIp,
-                        configIndex,
-                        ipName,
-                    );
-                    if (effectiveMode === "alpha" || effectiveMode === "both") {
-                        let configUuid = generateConfigUuid(p.id, configIndex);
-                        registerConfigEntry(
-                            configUuid,
-                            p.id,
-                            selectedProxyIp || "",
-                        );
-                        lines.push(
-                            `${getAlpha()}://${configUuid}@${ip}:${port}?${extBase}#${vName}`,
-                        );
-                    }
-                    if (effectiveMode === "beta" || effectiveMode === "both") {
-                        let randomJunk = Array.from(
-                            { length: 11 },
-                            () =>
-                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                    Math.floor(Math.random() * 62)
-                                ],
-                        ).join("");
-                        let payloadTr = {
-                            junk: randomJunk,
-                            protocol: "tr",
-                            mode: "proxyip",
-                            panelIPs: [],
-                            relayIdx: configIndex,
-                        };
-                        let pathStrTr = "/" + btoa(JSON.stringify(payloadTr));
-                        let trojanExtBase = `security=${sec}&sni=${hName}&fp=${sysConfig.agent}&type=ws&host=${hName}&path=${encodeURIComponent(pathStrTr)}`;
-                        if (sysConfig.enableOpt2)
-                            trojanExtBase += `&pbk=enabled`;
-                        trojanExtBase += `&allowInsecure=${allowInsecure ? "1" : "0"}`;
-                        try {
-                            trojanExtBase += buildSegFragmentParam(p);
-                            trojanExtBase += buildTlsMaskParam(p);
-                        } catch (e) {}
-                        lines.push(
-                            `${getBeta()}://${p.id}@${ip}:${port}?${trojanExtBase}#${tName}`,
-                        );
-                    }
-                    if (sysConfig.enableDirectConfigs && pips.length > 0 && selectedProxyIp === pips[0]) {
-                        configIndex++;
-                        let dvName = getConfigName(
-                            "alpha",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            null,
-                            configIndex,
-                            ipName,
-                            true
-                        );
-                        let dtName = getConfigName(
-                            "beta",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            null,
-                            configIndex,
-                            ipName,
-                            true
-                        );
-                        if (
-                            effectiveMode === "alpha" ||
-                            effectiveMode === "both"
-                        ) {
-                            let configUuid = generateConfigUuid(
-                                p.id,
-                                configIndex,
-                            );
-                            registerConfigEntry(configUuid, p.id, "");
-                            lines.push(
-                                `${getAlpha()}://${configUuid}@${ip}:${port}?${extBase}#${dvName}`,
-                            );
-                        }
-                        if (
-                            effectiveMode === "beta" ||
-                            effectiveMode === "both"
-                        ) {
-                            let randomJunk2 = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadTr2 = {
-                                junk: randomJunk2,
-                                protocol: "tr",
-                                mode: "proxyip",
-                                panelIPs: [],
-                                relayIdx: configIndex,
-                            };
-                            let pathStrTr2 =
-                                "/" + btoa(JSON.stringify(payloadTr2));
-                            let trojanExtBase2 = `security=${sec}&sni=${hName}&fp=${sysConfig.agent}&type=ws&host=${hName}&path=${encodeURIComponent(pathStrTr2)}`;
-                            if (sysConfig.enableOpt2)
-                                trojanExtBase2 += `&pbk=enabled`;
-                            trojanExtBase2 += `&allowInsecure=${allowInsecure ? "1" : "0"}`;
-                            try {
-                                trojanExtBase2 += buildSegFragmentParam(p);
-                                trojanExtBase2 += buildTlsMaskParam(p);
-                            } catch (e) {}
-                            lines.push(
-                                `${getBeta()}://${p.id}@${ip}:${port}?${trojanExtBase2}#${dtName}`,
-                            );
-                        }
-                    }
-                    configIndex++;
-                    });
-                });
-            });
-        });
-    });
-    // ─── Upstream: prepend upstream URI ───
-    let parsedUpstream = parseVlessUri(sysConfig.upstreamUri);
-    if (parsedUpstream) {
-        lines.unshift(parsedUpstream.raw);
-    }
-    return lines.join("\n");
-}
-
-
-let clashTemplate = null;
-let singboxTemplate = null;
-let VTemplate = null;
-
-async function fetchTemplates(env) {
-    const repo = sysConfig.githubRepo || "itsyebekhe/nahan";
-    if (!clashTemplate) {
-        try {
-            let res = await fetchT(`https://raw.githubusercontent.com/${repo}/main/clash.yml`);
-            if (res.ok) clashTemplate = await res.text();
-        } catch(e) {}
-    }
-    if (!singboxTemplate) {
-        try {
-            let res = await fetchT(`https://raw.githubusercontent.com/${repo}/main/singbox.json`);
-            if (res.ok) singboxTemplate = await res.json();
-        } catch(e) {}
-    }
-    if (!VTemplate) {
-        try {
-            let res = await fetchT(`https://raw.githubusercontent.com/${repo}/main/v.json`);
-            if (res.ok) VTemplate = await res.json();
-        } catch(e) {}
-    }
-}
-
-
-function getCustomRouting() {
-    let cr = sysConfig.customRouting || "";
-    let lines = cr.split('\n').map(l => l.trim()).filter(Boolean);
-    let domains = [];
-    let ips = [];
-    let geoips = [];
-    let geosites = [];
-    for (let l of lines) {
-        let low = l.toLowerCase();
-        if (low.startsWith("geoip:")) {
-            geoips.push(l.substring(6).trim().toUpperCase());
-        } else if (low.startsWith("geosite:")) {
-            geosites.push(l.substring(8).trim().toLowerCase());
-        } else if (l.match(/^[0-9\.\/:]+$/)) {
-            ips.push(l);
-        } else {
-            domains.push(l);
-        }
-    }
-    return { domains, ips, geoips, geosites };
-}
-
-async function buildYamlProfile(hostName, targetSub = null, allowInsecure = false, env = null) {
-    let ports = sysConfig.socketPorts
-        ? sysConfig.socketPorts
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-        : ["443"];
-    let reqPath = encodeURI(`/${sysConfig.apiRoute}`);
-    let proxies = [];
-    let proxyNames = [];
-    let nameCounts = {}; // Track proxy names for deduplication
-    let profiles = getAllProfiles(targetSub);
-    let allHostNames = [
-        ...new Set(profiles.flatMap((p) => getProfileHostNames(hostName, p))),
-    ];
-    await preloadIpFlags(profiles, allHostNames);
-    let proxyGeoInfo = new Map(); // proxyName -> {country, flag}
-
-    // Add fake configs
-    let fakeNames = getFakeConfigNames(targetSub);
-    let fakeRefs = [];
-    fakeNames.forEach((name) => {
-        proxies.push(
-            `- name: "${name}"\n  type: ${getBeta()}\n  server: 127.0.0.1\n  port: 80\n  password: "${activeDeviceId}"\n  udp: true\n  tls: false`,
-        );
-        fakeRefs.push(`"${name}"`);
-    });
-
-    const getUniqueName = (baseName) => {
-        if (!nameCounts[baseName]) {
-            nameCounts[baseName] = 1;
-            return baseName;
-        }
-        let counter = nameCounts[baseName];
-        let newName = `${baseName}-${counter}`;
-        while (nameCounts[newName]) {
-            counter++;
-            newName = `${baseName}-${counter}`;
-        }
-        nameCounts[baseName] = counter + 1;
-        nameCounts[newName] = 1;
-        return newName;
-    };
-
-    profiles.forEach((p) => {
-        let pips = getEffectivePips(p);
-        let effectiveMode = p.userMode || sysConfig.mode;
-        let effectivePorts = p.userPorts
-            ? p.userPorts
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
-            : ports;
-        let maxCfg = p.maxConfigs || null;
-
-        let configIndex = 0;
-        let profileHostNames = getProfileHostNames(hostName, p);
-
-        profileHostNames.forEach((hName) => {
-            let ipEntries = getCleanIpsWithNames(hName, p.cleanIp);
-            let allIps = ipEntries.map((e) => e.ip);
-            let ips = calcEffectiveIps(
-                allIps,
-                maxCfg,
-                effectiveMode,
-                effectivePorts,
-                pips.length
-            );
-            let ipNameMap = {};
-            ipEntries.forEach((e) => {
-                ipNameMap[e.ip] = e.name;
-            });
-            effectivePorts.forEach((port) => {
-                let sec = getTransportParams(port) === "tls" ? "true" : "false";
-                ips.forEach((ip) => {
-                    let _pips = pips.length > 0 ? pips : [null];
-                    _pips.forEach((selectedProxyIp) => {
-                    let ipName = ipNameMap[ip] || "";
-                    if (effectiveMode === "alpha" || effectiveMode === "both") {
-                        let vName = getConfigName(
-                            "alpha",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            selectedProxyIp,
-                            configIndex,
-                            ipName,
-                        );
-                        vName = getUniqueName(vName);
-                        proxyNames.push(`"${vName}"`);
-                        proxyGeoInfo.set(
-                            vName,
-                            getGeoInfo(selectedProxyIp || ip),
-                        );
-                        let randomJunk = Array.from(
-                            { length: 11 },
-                            () =>
-                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                    Math.floor(Math.random() * 62)
-                                ],
-                        ).join("");
-                        let payloadVl = {
-                            junk: randomJunk,
-                            protocol: "vl",
-                            mode: "proxyip",
-                            panelIPs: [],
-                        };
-                        let pathStrVl = "/" + btoa(JSON.stringify(payloadVl));
-                        let configUuid = generateConfigUuid(p.id, configIndex);
-                        registerConfigEntry(
-                            configUuid,
-                            p.id,
-                            selectedProxyIp || "",
-                        );
-                        proxies.push(
-                            `- name: "${vName.replace(/"/g, '""')}"\n  type: ${getAlpha()}\n  server: ${ip}\n  port: ${port}\n  uuid: ${configUuid}\n  udp: true\n  tls: ${sec}\n  servername: ${hName}\n  client-fingerprint: ${sysConfig.agent || "random"}\n  network: ws\n  ws-opts:\n    path: "${pathStrVl}"\n    headers:\n      Host: ${hName}\n  skip-cert-verify: ${allowInsecure}\n${sysConfig.enableOpt1 ? "  tfo: true" : ""}`,
-                        );
-                    }
-                    if (effectiveMode === "beta" || effectiveMode === "both") {
-                        let tName = getConfigName(
-                            "beta",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            selectedProxyIp,
-                            configIndex,
-                            ipName,
-                        );
-                        tName = getUniqueName(tName);
-                        proxyNames.push(`"${tName}"`);
-                        proxyGeoInfo.set(
-                            tName,
-                            getGeoInfo(selectedProxyIp || ip),
-                        );
-                        let randomJunkTr = Array.from(
-                            { length: 11 },
-                            () =>
-                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                    Math.floor(Math.random() * 62)
-                                ],
-                        ).join("");
-                        let payloadTr = {
-                            junk: randomJunkTr,
-                            protocol: "tr",
-                            mode: "proxyip",
-                            panelIPs: [],
-                            relayIdx: configIndex,
-                        };
-                        let pathStrTr = "/" + btoa(JSON.stringify(payloadTr));
-                        proxies.push(
-                            `- name: "${tName.replace(/"/g, '""')}"\n  type: ${getBeta()}\n  server: ${ip}\n  port: ${port}\n  password: "${p.id}"\n  udp: true\n  tls: ${sec}\n  sni: ${hName}\n  client-fingerprint: ${sysConfig.agent || "random"}\n  network: ws\n  ws-opts:\n    path: "${pathStrTr}"\n    headers:\n      Host: ${hName}\n  skip-cert-verify: ${allowInsecure}\n${sysConfig.enableOpt1 ? "  tfo: true" : ""}`,
-                        );
-                    }
-                    configIndex++;
-                    if (sysConfig.enableDirectConfigs && pips.length > 0 && selectedProxyIp === pips[0]) {
-                        let dcIndex = configIndex;
-                        if (
-                            effectiveMode === "alpha" ||
-                            effectiveMode === "both"
-                        ) {
-                            let dvName = getUniqueName(
-                                getConfigName(
-                                    "alpha",
-                                    p.name,
-                                    port,
-                                    hName,
-                                    ip,
-                                    null,
-                                    dcIndex,
-                                    ipName,
-                                    true
-                                ),
-                            );
-                            proxyNames.push(`"${dvName}"`);
-                            proxyGeoInfo.set(dvName, getGeoInfo(ip));
-                            let randomJunk = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadVl = {
-                                junk: randomJunk,
-                                protocol: "vl",
-                                mode: "proxyip",
-                                panelIPs: [],
-                            };
-                            let pathStrVl =
-                                "/" + btoa(JSON.stringify(payloadVl));
-                            let configUuid = generateConfigUuid(p.id, dcIndex);
-                            registerConfigEntry(configUuid, p.id, "");
-                            proxies.push(
-                                `- name: "${dvName.replace(/"/g, '""')}"\n  type: ${getAlpha()}\n  server: ${ip}\n  port: ${port}\n  uuid: ${configUuid}\n  udp: true\n  tls: ${sec}\n  servername: ${hName}\n  client-fingerprint: ${sysConfig.agent || "random"}\n  network: ws\n  ws-opts:\n    path: "${pathStrVl}"\n    headers:\n      Host: ${hName}\n  skip-cert-verify: ${allowInsecure}\n${sysConfig.enableOpt1 ? "  tfo: true" : ""}`,
-                            );
-                        }
-                        if (
-                            effectiveMode === "beta" ||
-                            effectiveMode === "both"
-                        ) {
-                            let dtName = getUniqueName(
-                                getConfigName(
-                                    "beta",
-                                    p.name,
-                                    port,
-                                    hName,
-                                    ip,
-                                    null,
-                                    dcIndex,
-                                    ipName,
-                                    true
-                                ),
-                            );
-                            proxyNames.push(`"${dtName}"`);
-                            proxyGeoInfo.set(dtName, getGeoInfo(ip));
-                            let randomJunk = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadTr = {
-                                junk: randomJunk,
-                                protocol: "tr",
-                                mode: "proxyip",
-                                panelIPs: [],
-                                relayIdx: configIndex,
-                            };
-                            let pathStrTr =
-                                "/" + btoa(JSON.stringify(payloadTr));
-                            let randomJunkDt = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadDt = {
-                                junk: randomJunkDt,
-                                protocol: "tr",
-                                mode: "proxyip",
-                                panelIPs: [],
-                                relayIdx: dcIndex,
-                            };
-                            let pathStrDt =
-                                "/" + btoa(JSON.stringify(payloadDt));
-                            proxies.push(
-                                `- name: "${dtName.replace(/"/g, '""')}"\n  type: ${getBeta()}\n  server: ${ip}\n  port: ${port}\n  password: "${p.id}"\n  udp: true\n  tls: ${sec}\n  sni: ${hName}\n  client-fingerprint: ${sysConfig.agent || "random"}\n  network: ws\n  ws-opts:\n    path: "${pathStrDt}"\n    headers:\n      Host: ${hName}\n  skip-cert-verify: ${allowInsecure}\n${sysConfig.enableOpt1 ? "  tfo: true" : ""}`,
-                            );
-                        }
-                        configIndex++;
-                    }
-                    });
-                });
-            });
-        });
-    });
-
-    // ─── Upstream chaining: add upstream proxy to YAML ───
-    let parsedUpstreamYaml = parseVlessUri(sysConfig.upstreamUri);
-    let upstreamNameYaml = "";
-    if (parsedUpstreamYaml) {
-        let upProxy = upstreamToClashProxy(parsedUpstreamYaml);
-        upstreamNameYaml = upProxy.name;
-        let upYaml = `- name: "${upProxy.name.replace(/"/g, '""')}"
-  type: ${getAlpha()}
-  server: ${upProxy.server}
-  port: ${upProxy.port}
-  uuid: ${upProxy.uuid}
-  udp: true
-  tls: ${upProxy.tls}
-  servername: ${upProxy.servername}
-  client-fingerprint: ${upProxy["client-fingerprint"] || "random"}
-  skip-cert-verify: ${upProxy["skip-cert-verify"]}
-  network: ${upProxy.network}
-  ws-opts:
-    path: "${upProxy["ws-opts"]?.path || "/"}"
-    headers:
-      Host: ${upProxy["ws-opts"]?.headers?.Host || upProxy.servername}`;
-        proxies.unshift(upYaml);
-        proxyNames.unshift(`"${upProxy.name}"`);
-    }
-
-    // Build per-country groups from geo info
-    let countryGroups = new Map(); // "country" -> {flag, proxies[]}
-    proxyGeoInfo.forEach((geo, name) => {
-        let key = geo.country || "Unknown";
-        if (!countryGroups.has(key)) {
-            countryGroups.set(key, { flag: geo.flag || "🌐", proxies: [] });
-        }
-        countryGroups.get(key).proxies.push(name);
-    });
-    let sortedCountries = Array.from(countryGroups.entries()).sort((a, b) =>
-        a[0].localeCompare(b[0]),
-    );
-
-    // Build proxy-groups YAML
-    let groupsYaml =
-        "proxy-groups:\n" +
-        '  - name: "✅ Selector"\n' +
-        "    type: select\n" +
-        "    proxies:\n" +
-        '      - "⚡ Fastest"\n' +
-        '      - "🖐 Manual"\n';
-    sortedCountries.forEach(([country, info]) => {
-        groupsYaml += `      - "${info.flag} ${country}"\n`;
-    });
-
-    // Fastest — url-test with ALL proxies
-    groupsYaml +=
-        '\n  - name: "⚡ Fastest"\n' +
-        "    type: url-test\n" +
-        '    url: "https://www.gstatic.com/generate_204"\n' +
-        "    interval: 30\n" +
-        "    tolerance: 50\n" +
-        "    proxies:\n";
-    proxyNames.forEach((n) => {
-        groupsYaml += `      - ${n}\n`;
-    });
-
-    // Manual — select with ALL proxies
-    groupsYaml +=
-        '\n  - name: "🖐 Manual"\n' + "    type: select\n" + "    proxies:\n";
-    proxyNames.forEach((n) => {
-        groupsYaml += `      - ${n}\n`;
-    });
-
-    // Per-country url-test groups
-    sortedCountries.forEach(([country, info]) => {
-        groupsYaml +=
-            `\n  - name: "${info.flag} ${country}"\n` +
-            "    type: url-test\n" +
-            '    url: "https://www.gstatic.com/generate_204"\n' +
-            "    interval: 30\n" +
-            "    tolerance: 50\n" +
-            "    proxies:\n";
-        info.proxies.forEach((name) => {
-            groupsYaml += `      - "${name}"\n`;
-        });
-    });
-
-    let cr = getCustomRouting();
-    let customRules = [];
-    cr.domains.forEach(d => {
-        customRules.push(`  - DOMAIN,${d},DIRECT`);
-        customRules.push(`  - DOMAIN-SUFFIX,${d},DIRECT`);
-    });
-    cr.ips.forEach(ip => {
-        customRules.push(`  - IP-CIDR,${ip},DIRECT`);
-    });
-    cr.geoips.forEach(g => {
-        customRules.push(`  - GEOIP,${g},DIRECT`);
-    });
-    cr.geosites.forEach(g => {
-        customRules.push(`  - GEOSITE,${g},DIRECT`);
-    });
-
-    let rulesOutput = customRules.length > 0 
-        ? customRules.join("\n") 
-        : `  - DOMAIN-SUFFIX,ir,DIRECT
-  - DOMAIN-KEYWORD,gov.ir,DIRECT
-  - DOMAIN-SUFFIX,fa,DIRECT
-  - GEOIP,IR,DIRECT`;
-
-    return `mixed-port: 7890
-ipv6: true
-allow-lan: false
-unified-delay: false
-log-level: warning
-mode: rule
-disable-keep-alive: false
-keep-alive-idle: 10
-keep-alive-interval: 15
-tcp-concurrent: true
-geo-auto-update: true
-geo-update-interval: 168
-external-controller: 127.0.0.1:9090
-external-controller-cors:
-  allow-origins:
-    - "*"
-  allow-private-network: true
-external-ui: ui
-external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
-
-profile:
-  store-selected: true
-  store-fake-ip: true
-
-dns:
-  enable: true
-  respect-rules: true
-  use-system-hosts: false
-  listen: 127.0.0.1:1053
-  ipv6: true
-  hosts:
-    "rule-set:category-ads-all": "rcode://refused"
-  nameserver:
-    - "https://8.8.8.8/dns-query#✅ Selector"
-  proxy-server-nameserver:
-    - "8.8.8.8#DIRECT"
-  direct-nameserver:
-    - "8.8.8.8#DIRECT"
-  direct-nameserver-follow-policy: true
-  enhanced-mode: redir-host
-
-tun:
-  enable: true
-  stack: mixed
-  auto-route: true
-  strict-route: true
-  auto-detect-interface: true
-  dns-hijack:
-    - "any:53"
-    - "tcp://any:53"
-  mtu: 9000
-
-sniffer:
-  enable: true
-  force-dns-mapping: true
-  parse-pure-ip: true
-  override-destination: true
-  sniff:
-    HTTP:
-      ports: [80, 8080, 8880, 2052, 2082, 2086, 2095]
-    TLS:
-      ports: [443, 8443, 2053, 2083, 2087, 2096]
-
-proxies:
-${proxies.join("\n")}
-
-${groupsYaml}
-
-rules:
-${rulesOutput}
-  - MATCH,✅ Selector
-`;
-}
-
-// Obfuscated string keys to prevent Cloudflare scanners block on vpn/proxy keywords
-const k_pxs = "pro" + "xies";
-const k_px_gps = "pro" + "xy-gro" + "ups";
-const k_obds = "out" + "bounds";
-const k_vl_mode = "vl" + "ess";
-const k_tr_mode = "tro" + "jan";
-
-function getIpTypeLabel(ip) {
-    if (ip.includes(":") || ip.includes("[")) return "IPv6";
-    if (/^[0-9.]+$/.test(ip)) return "IPv4";
-    return "Domain";
-}
-
-async function buildClashJsonProfile(
-    hostName,
-    targetSub = null,
-    allowInsecure = false,
-    env = null,
-) {
-    let ports = sysConfig.socketPorts
-        ? sysConfig.socketPorts
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-        : ["443"];
-    let profiles = getAllProfiles(targetSub);
-    let allHostNames = [
-        ...new Set(profiles.flatMap((p) => getProfileHostNames(hostName, p))),
-    ];
-    await preloadIpFlags(profiles, allHostNames);
-    let proxyGeoInfo = new Map(); // proxyName -> {country, flag}
-    let reqPath = encodeURI(`/${sysConfig.apiRoute}`);
-
-    let proxiesArr = [];
-    let dynamicTags = [];
-    let nameCounts = {};
-
-    // Add fake configs
-    let fakeNames = getFakeConfigNames(targetSub);
-    let fakeRefs = [];
-    fakeNames.forEach((name) => {
-        proxiesArr.push({
-            name: name,
-            type: k_tr_mode,
-            server: "127.0.0.1",
-            port: 80,
-            password: activeDeviceId,
-            tls: false,
-            udp: true,
-        });
-        fakeRefs.push(name);
-    });
-
-    const getUniqueName = (baseName) => {
-        if (!nameCounts[baseName]) {
-            nameCounts[baseName] = 1;
-            return baseName;
-        }
-        let counter = nameCounts[baseName];
-        let newName = `${baseName}-${counter}`;
-        while (nameCounts[newName]) {
-            counter++;
-            newName = `${baseName}-${counter}`;
-        }
-        nameCounts[baseName] = counter + 1;
-        nameCounts[newName] = 1;
-        return newName;
-    };
-
-    profiles.forEach((p) => {
-        let pips = getEffectivePips(p);
-        let effectiveMode = p.userMode || sysConfig.mode;
-        let effectivePorts = p.userPorts
-            ? p.userPorts
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
-            : ports;
-        let maxCfg = p.maxConfigs || null;
-
-        let configIndex = 0;
-        let profileHostNames = getProfileHostNames(hostName, p);
-
-        profileHostNames.forEach((hName) => {
-            let ipEntries = getCleanIpsWithNames(hName, p.cleanIp);
-            let allIps = ipEntries.map((e) => e.ip);
-            let ips = calcEffectiveIps(
-                allIps,
-                maxCfg,
-                effectiveMode,
-                effectivePorts,
-                pips.length
-            );
-            let ipNameMap = {};
-            ipEntries.forEach((e) => {
-                ipNameMap[e.ip] = e.name;
-            });
-            effectivePorts.forEach((port) => {
-                let sec = getTransportParams(port) === "tls";
-                ips.forEach((ip) => {
-                    let isVless =
-                        effectiveMode === "alpha" || effectiveMode === "both";
-                    let isTrojan =
-                        effectiveMode === "beta" || effectiveMode === "both";
-                    let _pips = pips.length > 0 ? pips : [null];
-                    _pips.forEach((selectedProxyIp) => {
-                    let ipName = ipNameMap[ip] || "";
-
-                    if (isVless) {
-                        let tagStr = getConfigName(
-                            "alpha",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            selectedProxyIp,
-                            configIndex,
-                            ipName,
-                        );
-                        tagStr = getUniqueName(tagStr);
-                        dynamicTags.push(tagStr);
-                        proxyGeoInfo.set(tagStr, getGeoInfo(selectedProxyIp || ip));
-
-                        let randomJunk = Array.from(
-                            { length: 11 },
-                            () =>
-                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                    Math.floor(Math.random() * 62)
-                                ],
-                        ).join("");
-                        let payloadVl = {
-                            junk: randomJunk,
-                            protocol: "vl",
-                            mode: "proxyip",
-                            panelIPs: [],
-                        };
-                        let pathStrVl = "/" + btoa(JSON.stringify(payloadVl));
-
-                        let configUuid = generateConfigUuid(p.id, configIndex);
-                        registerConfigEntry(
-                            configUuid,
-                            p.id,
-                            selectedProxyIp || "",
-                        );
-
-                        let ob = {
-                            name: tagStr,
-                            type: k_vl_mode,
-                            server: ip,
-                            port: parseInt(port),
-                            "ip-version": "ipv4-prefer",
-                            tfo: sysConfig.enableOpt1 || false,
-                            udp: true,
-                            uuid: configUuid,
-                            "packet-encoding": "xudp",
-                            tls: sec,
-                            servername: hName,
-                            "client-fingerprint": sysConfig.agent || "random",
-                            "skip-cert-verify": allowInsecure,
-                            alpn: ["http/1.1"],
-                            network: "ws",
-                            "ws-opts": {
-                                path: pathStrVl,
-                                "max-early-data": 2560,
-                                "early-data-header-name":
-                                    "Sec-WebSocket-Protocol",
-                                headers: {
-                                    Host: hName,
-                                },
-                            },
-                        };
-                        if (sysConfig.enableOpt2) {
-                            ob["ech-opts"] = {
-                                enable: true,
-                                config: "AEX+DQBBTwAgACCfCTo0YCUiDF1bGU9Z72l8Bs1gVxt6D6FefjfzaJHcfwAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA=",
-                            };
-                        }
-                        proxiesArr.push(ob);
-                    }
-
-                    if (isTrojan) {
-                        let tagStr = getConfigName(
-                            "beta",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            selectedProxyIp,
-                            configIndex,
-                            ipName,
-                        );
-                        tagStr = getUniqueName(tagStr);
-                        dynamicTags.push(tagStr);
-                        proxyGeoInfo.set(tagStr, getGeoInfo(selectedProxyIp || ip));
-
-                        let randomJunk = Array.from(
-                            { length: 11 },
-                            () =>
-                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                    Math.floor(Math.random() * 62)
-                                ],
-                        ).join("");
-                        let payloadTr = {
-                            junk: randomJunk,
-                            protocol: "tr",
-                            mode: "proxyip",
-                            panelIPs: [],
-                            relayIdx: configIndex,
-                        };
-                        let pathStrTr = "/" + btoa(JSON.stringify(payloadTr));
-
-                        let configUuid2 = generateConfigUuid(p.id, configIndex);
-                        registerConfigEntry(
-                            configUuid2,
-                            p.id,
-                            selectedProxyIp || "",
-                        );
-
-                        let ob = {
-                            name: tagStr,
-                            type: k_tr_mode,
-                            server: ip,
-                            port: parseInt(port),
-                            "ip-version": "ipv4-prefer",
-                            tfo: sysConfig.enableOpt1 || false,
-                            udp: true,
-                            password: p.id,
-                            "packet-encoding": "xudp",
-                            tls: sec,
-                            sni: hName,
-                            "client-fingerprint": sysConfig.agent || "random",
-                            "skip-cert-verify": allowInsecure,
-                            alpn: ["http/1.1"],
-                            network: "ws",
-                            "ws-opts": {
-                                path: pathStrTr,
-                                "max-early-data": 2560,
-                                "early-data-header-name":
-                                    "Sec-WebSocket-Protocol",
-                                headers: {
-                                    Host: hName,
-                                },
-                            },
-                        };
-                        if (sysConfig.enableOpt2) {
-                            ob["ech-opts"] = {
-                                enable: true,
-                                config: "AEX+DQBBTwAgACCfCTo0YCUiDF1bGU9Z72l8Bs1gVxt6D6FefjfzaJHcfwAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA=",
-                            };
-                        }
-                        proxiesArr.push(ob);
-                    }
-                    configIndex++;
-                    if (sysConfig.enableDirectConfigs && pips.length > 0 && selectedProxyIp === pips[0]) {
-                        if (isVless) {
-                            let tagStr = getUniqueName(
-                                getConfigName(
-                                    "alpha",
-                                    p.name,
-                                    port,
-                                    hName,
-                                    ip,
-                                    null,
-                                    configIndex,
-                                    ipName, true
-                                ),
-                            );
-                            dynamicTags.push(tagStr);
-                            proxyGeoInfo.set(tagStr, getGeoInfo(ip));
-                            let randomJunk = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadVl = {
-                                junk: randomJunk,
-                                protocol: "vl",
-                                mode: "proxyip",
-                                panelIPs: [],
-                            };
-                            let pathStrVl =
-                                "/" + btoa(JSON.stringify(payloadVl));
-                            let configUuid = generateConfigUuid(
-                                p.id,
-                                configIndex,
-                            );
-                            registerConfigEntry(configUuid, p.id, "");
-                            let ob = {
-                                name: tagStr,
-                                type: k_vl_mode,
-                                server: ip,
-                                port: parseInt(port),
-                                "ip-version": "ipv4-prefer",
-                                tfo: sysConfig.enableOpt1 || false,
-                                udp: true,
-                                uuid: configUuid,
-                                "packet-encoding": "xudp",
-                                tls: sec,
-                                servername: hName,
-                                "client-fingerprint":
-                                    sysConfig.agent || "random",
-                                "skip-cert-verify": allowInsecure,
-                                alpn: ["http/1.1"],
-                                network: "ws",
-                                "ws-opts": {
-                                    path: pathStrVl,
-                                    "max-early-data": 2560,
-                                    "early-data-header-name":
-                                        "Sec-WebSocket-Protocol",
-                                    headers: { Host: hName },
-                                },
-                            };
-                            if (sysConfig.enableOpt2)
-                                ob["ech-opts"] = {
-                                    enable: true,
-                                    config: "AEX+DQBBTwAgACCfCTo0YCUiDF1bGU9Z72l8Bs1gVxt6D6FefjfzaJHcfwAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA=",
-                                };
-                            proxiesArr.push(ob);
-                        }
-                        if (isTrojan) {
-                            let tagStr = getUniqueName(
-                                getConfigName(
-                                    "beta",
-                                    p.name,
-                                    port,
-                                    hName,
-                                    ip,
-                                    null,
-                                    configIndex,
-                                    ipName, true
-                                ),
-                            );
-                            dynamicTags.push(tagStr);
-                            proxyGeoInfo.set(tagStr, getGeoInfo(ip));
-                            let randomJunk = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadTr = {
-                                junk: randomJunk,
-                                protocol: "tr",
-                                mode: "proxyip",
-                                panelIPs: [],
-                                relayIdx: configIndex,
-                            };
-                            let pathStrTr =
-                                "/" + btoa(JSON.stringify(payloadTr));
-                            let configUuid2 = generateConfigUuid(
-                                p.id,
-                                configIndex,
-                            );
-                            let ob = {
-                                name: tagStr,
-                                type: k_tr_mode,
-                                server: ip,
-                                port: parseInt(port),
-                                "ip-version": "ipv4-prefer",
-                                tfo: sysConfig.enableOpt1 || false,
-                                udp: true,
-                                password: p.id,
-                                "packet-encoding": "xudp",
-                                tls: sec,
-                                sni: hName,
-                                "client-fingerprint":
-                                    sysConfig.agent || "random",
-                                "skip-cert-verify": allowInsecure,
-                                alpn: ["http/1.1"],
-                                network: "ws",
-                                "ws-opts": {
-                                    path: pathStrTr,
-                                    "max-early-data": 2560,
-                                    "early-data-header-name":
-                                        "Sec-WebSocket-Protocol",
-                                    headers: { Host: hName },
-                                },
-                            };
-                            if (sysConfig.enableOpt2)
-                                ob["ech-opts"] = {
-                                    enable: true,
-                                    config: "AEX+DQBBTwAgACCfCTo0YCUiDF1bGU9Z72l8Bs1gVxt6D6FefjfzaJHcfwAEAAEAAQASY2xvdWRmbGFyZS1lY2guY29tAAA=",
-                                };
-                            proxiesArr.push(ob);
-                        }
-                        configIndex++;
-                    }
-                    });
-                });
-            });
-        });
-    });
-
-    if (dynamicTags.length === 0) { dynamicTags.push("direct"); }
-
-    // ─── Upstream chaining: add upstream proxy ───
-    let parsedUpstream = parseVlessUri(sysConfig.upstreamUri);
-    let upstreamProxyName = "";
-    if (parsedUpstream) {
-        let upstreamProxy = upstreamToClashProxy(parsedUpstream);
-        upstreamProxyName = upstreamProxy.name;
-        proxiesArr.unshift(upstreamProxy);
-        dynamicTags.unshift(upstreamProxyName);
-    }
-
-    // Build per-country groups from geo info
-    let countryGroups = new Map(); // "country" -> {flag, proxies[]}
-    proxyGeoInfo.forEach((geo, name) => {
-        let key = geo.country || "Unknown";
-        if (!countryGroups.has(key)) {
-            countryGroups.set(key, { flag: geo.flag || "🌐", proxies: [] });
-        }
-        countryGroups.get(key).proxies.push(name);
-    });
-    let sortedCountries = Array.from(countryGroups.entries()).sort((a, b) =>
-        a[0].localeCompare(b[0]),
-    );
-
-    // Build proxy-groups JSON
-    let groupsJson = [
-        {
-            name: "✅ Selector",
-            type: "select",
-            proxies: [
-                "⚡ Fastest",
-                "🖐 Manual",
-                ...sortedCountries.map(([c, info]) => `${info.flag} ${c}`),
-            ],
-        },
-        {
-            name: "⚡ Fastest",
-            type: "url-test",
-            url: "https://www.gstatic.com/generate_204",
-            interval: 30,
-            tolerance: 50,
-            proxies: dynamicTags,
-        },
-        { name: "🖐 Manual", type: "select", proxies: dynamicTags },
-        ...sortedCountries.map(([country, info]) => ({
-            name: `${info.flag} ${country}`,
-            type: "url-test",
-            url: "https://www.gstatic.com/generate_204",
-            interval: 30,
-            tolerance: 50,
-            proxies: info.proxies,
-        })),
-    ];
-
-    let cr = getCustomRouting();
-    let jsonCustomRules = [];
-    cr.domains.forEach(d => {
-        jsonCustomRules.push(`DOMAIN,${d},DIRECT`);
-        jsonCustomRules.push(`DOMAIN-SUFFIX,${d},DIRECT`);
-    });
-    cr.ips.forEach(ip => {
-        jsonCustomRules.push(`IP-CIDR,${ip},DIRECT,no-resolve`);
-    });
-    cr.geoips.forEach(g => {
-        jsonCustomRules.push(`GEOIP,${g},DIRECT,no-resolve`);
-    });
-    cr.geosites.forEach(g => {
-        jsonCustomRules.push(`GEOSITE,${g},DIRECT`);
-    });
-
+function 处理基础64值数组(值64字符串) {
+  if (!值64字符串) return {
+    error: null
+  };
+  try {
+    值64字符串 = 值64字符串.replace(/-/g, '+').replace(/_/g, '/');
     return {
-        "mixed-port": 7890,
-        ipv6: true,
-        "allow-lan": false,
-        "unified-delay": false,
-        "log-level": "warning",
-        mode: "rule",
-        "disable-keep-alive": false,
-        "keep-alive-idle": 10,
-        "keep-alive-interval": 15,
-        "tcp-concurrent": true,
-        "geo-auto-update": true,
-        "geo-update-interval": 168,
-        "external-controller": "127.0.0.1:9090",
-        "external-controller-cors": {
-            "allow-origins": ["*"],
-            "allow-private-network": true,
-        },
-        "external-ui": "ui",
-        "external-ui-url":
-            "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip",
-        profile: {
-            "store-selected": true,
-            "store-fake-ip": true,
-        },
-        dns: {
-            enable: true,
-            "respect-rules": true,
-            "use-system-hosts": false,
-            listen: "127.0.0.1:1053",
-            ipv6: true,
-            hosts: {
-                "rule-set:category-ads-all": "rcode://refused",
-            },
-            nameserver: ["https://8.8.8.8/dns-query#✅ Selector"],
-            "proxy-server-nameserver": ["8.8.8.8#DIRECT"],
-            "direct-nameserver": ["8.8.8.8#DIRECT"],
-            "direct-nameserver-follow-policy": true,
-            "nameserver-policy": {
-                "rule-set:ir": "8.8.8.8#DIRECT",
-            },
-            "enhanced-mode": "redir-host",
-        },
-        tun: {
-            enable: true,
-            stack: "mixed",
-            "auto-route": true,
-            "strict-route": true,
-            "auto-detect-interface": true,
-            "dns-hijack": ["any:53", "tcp://any:53"],
-            mtu: 9000,
-        },
-        sniffer: {
-            enable: true,
-            "force-dns-mapping": true,
-            "parse-pure-ip": true,
-            "override-destination": true,
-            sniff: {
-                HTTP: {
-                    ports: [80, 8080, 8880, 2052, 2082, 2086, 2095],
-                },
-                TLS: {
-                    ports: [443, 8443, 2053, 2083, 2087, 2096],
-                },
-            },
-        },
-        [k_pxs]: proxiesArr,
-        [k_px_gps]: groupsJson,
-        "rule-providers": {
-            "category-ads-all": {
-                type: "http",
-                format: "text",
-                behavior: "domain",
-                path: "./ruleset/category-ads-all.txt",
-                interval: 86400,
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-clash-rules/release/category-ads-all.txt",
-            },
-            ir: {
-                type: "http",
-                format: "text",
-                behavior: "domain",
-                path: "./ruleset/ir.txt",
-                interval: 86400,
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-clash-rules/release/ir.txt",
-            },
-            "ir-cidr": {
-                type: "http",
-                format: "text",
-                behavior: "ipcidr",
-                path: "./ruleset/ir-cidr.txt",
-                interval: 86400,
-                url: "https://raw.githubusercontent.com/Chocolate4U/Iran-clash-rules/release/ircidr.txt",
-            },
-        },
-        rules: [
-            "GEOIP,lan,DIRECT,no-resolve",
-            "NETWORK,udp,REJECT",
-            "RULE-SET,category-ads-all,REJECT",
-            ...jsonCustomRules,
-            "RULE-SET,ir,DIRECT",
-            "RULE-SET,ir-cidr,DIRECT",
-            "MATCH,✅ Selector",
-        ],
-        ntp: {
-            enable: true,
-            server: "time.cloudflare.com",
-            port: 123,
-            interval: 30,
-        },
+      earlyData: Uint8Array.from(atob(值64字符串), 丙值117 => 丙值117.charCodeAt(0)).buffer,
+      error: null
     };
-}
-
-
-async function buildVJsonProfile(hostName, targetSub = null, allowInsecure = false, env = null) {
-    let ports = sysConfig.socketPorts ? sysConfig.socketPorts.split(",").map(s => s.trim()).filter(Boolean) : ["443"];
-    let profiles = getAllProfiles(targetSub);
-    let allHostNames = [...new Set(profiles.flatMap(p => getProfileHostNames(hostName, p)))];
-    await preloadIpFlags(profiles, allHostNames);
-    
-    let outboundsArr = [];
-    let configIndex = 0;
-    let nameCounts = {};
-    const getUniqueName = (baseName) => {
-        if (!nameCounts[baseName]) { nameCounts[baseName] = 1; return baseName; }
-        let c = nameCounts[baseName]; nameCounts[baseName] = c + 1; return baseName + '-' + c;
-    };
-
-    profiles.forEach((p) => {
-        let maxCfg = p.maxConfigs || 0;
-        let pips = [];
-        if (p.relayIps && p.relayIps.length > 0) pips = [...p.relayIps];
-        else if (sysConfig.customRelay && sysConfig.customRelay.trim() !== "") {
-            pips = sysConfig.customRelay.split(",").map(r => r.trim()).filter(Boolean);
-        }
-        
-        let hostNamesToUse = getProfileHostNames(hostName, p);
-        hostNamesToUse.forEach(hName => {
-            p.ipLists.forEach(ipList => {
-                let ips = ipList.ips;
-                let effectiveMode = ipList.mode || sysConfig.mode || "both";
-                let effectivePorts = (ipList.ports && ipList.ports.length > 0) ? ipList.ports : ports;
-                if (maxCfg > 0) ips = calcEffectiveIps(ips, maxCfg, effectiveMode, effectivePorts, pips.length);
-                let ipNameMap = {};
-                if (ipList.entries) ipList.entries.forEach(e => ipNameMap[e.ip] = e.name);
-                
-                effectivePorts.forEach(port => {
-                    let sec = (getTransportParams(port) === "tls") ? "tls" : "none";
-                    ips.forEach(ip => {
-                        let _pips = pips.length > 0 ? pips : [null];
-                        _pips.forEach((selectedProxyIp) => {
-                        let ipName = ipNameMap[ip] || "";
-                        
-                        if (effectiveMode === "alpha" || effectiveMode === "both") {
-                            let tag = getUniqueName(getConfigName("alpha", p.name, port, hName, ip, selectedProxyIp, configIndex, ipName));
-                            let configUuid = generateConfigUuid(p.id, configIndex);
-                            let randomJunk = Array.from({length:11}, ()=> "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random()*62)]).join("");
-                            let payload = { junk: randomJunk, protocol: "vl", mode: "proxyip", panelIPs: [], relayIdx: configIndex };
-                            let path = "/" + btoa(JSON.stringify(payload));
-                            
-                            let ob = {
-                                tag: tag,
-                                protocol: "vless",
-                                settings: {
-                                    vnext: [{ address: ip, port: parseInt(port), users: [{ id: configUuid, encryption: "none" }] }]
-                                },
-                                streamSettings: {
-                                    network: "ws",
-                                    security: sec,
-                                    tlsSettings: sec === "tls" ? { serverName: hName, allowInsecure: allowInsecure } : undefined,
-                                    wsSettings: { path: path, headers: { Host: hName } },
-                                    ...getSegStreamExtra(p)
-                                }
-                            };
-                            outboundsArr.push(ob);
-                        }
-                        
-                        if (effectiveMode === "beta" || effectiveMode === "both") {
-                            let tag = getUniqueName(getConfigName("beta", p.name, port, hName, ip, selectedProxyIp, configIndex, ipName));
-                            let randomJunk = Array.from({length:11}, ()=> "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(Math.random()*62)]).join("");
-                            let payload = { junk: randomJunk, protocol: "tr", mode: "proxyip", panelIPs: [], relayIdx: configIndex };
-                            let path = "/" + btoa(JSON.stringify(payload));
-                            
-                            let ob = {
-                                tag: tag,
-                                protocol: "trojan",
-                                settings: {
-                                    servers: [{ address: ip, port: parseInt(port), password: p.id }]
-                                },
-                                streamSettings: {
-                                    network: "ws",
-                                    security: sec,
-                                    tlsSettings: sec === "tls" ? { serverName: hName, allowInsecure: allowInsecure } : undefined,
-                                    wsSettings: { path: path, headers: { Host: hName } },
-                                    ...getSegStreamExtra(p)
-                                }
-                            };
-                            outboundsArr.push(ob);
-                        }
-                        configIndex++;
-                    });
-                    });
-                });
-            });
-        });
-    });
-
-    // ─── Upstream chaining: add upstream outbound ───
-    let parsedUpstream = parseVlessUri(sysConfig.upstreamUri);
-    if (parsedUpstream) {
-        let upstreamOb = upstreamToV2RayOb(parsedUpstream);
-        // Add proxySettings to chain through upstream
-        outboundsArr.forEach(ob => {
-            if (ob.protocol !== "direct" && ob.protocol !== "freedom" && ob.protocol !== "blackhole") {
-                ob.proxySettings = { tag: upstreamOb.tag, transportSeries: [] };
-            }
-        });
-        outboundsArr.unshift(upstreamOb);
-    }
-
-    await fetchTemplates(env);
-    if (VTemplate) {
-        let tpl = JSON.parse(JSON.stringify(VTemplate));
-        let newOutbounds = [];
-        
-        for (let ob of tpl.outbounds) {
-            if (ob === "__OUTBOUNDS__") {
-                newOutbounds.push(...outboundsArr);
-            } else {
-                newOutbounds.push(ob);
-            }
-        }
-        if (newOutbounds.length === 0) newOutbounds = outboundsArr;
-        tpl.outbounds = newOutbounds;
-        
-        // Inject Custom Routing
-        let cr = getCustomRouting();
-        if (cr.domains.length > 0) {
-            tpl.route.rules.unshift({ domain: cr.domains, outbound: "direct" });
-            tpl.route.rules.unshift({ domain_suffix: cr.domains, outbound: "direct" });
-        }
-        if (cr.ips.length > 0) {
-            tpl.route.rules.unshift({ ip_cidr: cr.ips, outbound: "direct" });
-        }
-        if (cr.geoips.length > 0) {
-            tpl.route.rules.unshift({ geoip: cr.geoips, outbound: "direct" });
-        }
-        if (cr.geosites.length > 0) {
-            tpl.route.rules.unshift({ geosite: cr.geosites, outbound: "direct" });
-        }
-        
-        return tpl;
-
-    }
-    return { outbounds: outboundsArr };
-}
-async function buildSingBoxJsonProfile(hostName, targetSub = null, allowInsecure = false, env = null) {
-    let ports = sysConfig.socketPorts
-        ? sysConfig.socketPorts
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-        : ["443"];
-    let profiles = getAllProfiles(targetSub);
-    let allHostNames = [
-        ...new Set(profiles.flatMap((p) => getProfileHostNames(hostName, p))),
-    ];
-    await preloadIpFlags(profiles, allHostNames);
-    let proxyGeoInfo = new Map(); // proxyName -> {country, flag}
-    let reqPath = encodeURI(`/${sysConfig.apiRoute}`);
-
-    let outboundsArr = [];
-    let dynamicTags = [];
-    let nameCounts = {};
-
-    // Add fake configs
-    let fakeNames = getFakeConfigNames(targetSub);
-    let fakeRefs = [];
-    fakeNames.forEach((name) => {
-        outboundsArr.push({
-            type: "direct",
-            tag: name,
-        });
-        fakeRefs.push(name);
-    });
-
-    const getUniqueName = (baseName) => {
-        if (!nameCounts[baseName]) {
-            nameCounts[baseName] = 1;
-            return baseName;
-        }
-        let counter = nameCounts[baseName];
-        let newName = `${baseName}-${counter}`;
-        while (nameCounts[newName]) {
-            counter++;
-            newName = `${baseName}-${counter}`;
-        }
-        nameCounts[baseName] = counter + 1;
-        nameCounts[newName] = 1;
-        return newName;
-    };
-
-    profiles.forEach((p) => {
-        let pips = getEffectivePips(p);
-        let effectiveMode = p.userMode || sysConfig.mode;
-        let effectivePorts = p.userPorts
-            ? p.userPorts
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean)
-            : ports;
-        let maxCfg = p.maxConfigs || null;
-
-        let configIndex = 0;
-        let profileHostNames = getProfileHostNames(hostName, p);
-
-        profileHostNames.forEach((hName) => {
-            let ipEntries = getCleanIpsWithNames(hName, p.cleanIp);
-            let allIps = ipEntries.map((e) => e.ip);
-            let ips = calcEffectiveIps(
-                allIps,
-                maxCfg,
-                effectiveMode,
-                effectivePorts,
-                pips.length
-            );
-            let ipNameMap = {};
-            ipEntries.forEach((e) => {
-                ipNameMap[e.ip] = e.name;
-            });
-            effectivePorts.forEach((port) => {
-                let sec = getTransportParams(port) === "tls";
-                ips.forEach((ip) => {
-                    let isVless =
-                        effectiveMode === "alpha" || effectiveMode === "both";
-                    let isTrojan =
-                        effectiveMode === "beta" || effectiveMode === "both";
-                    let _pips = pips.length > 0 ? pips : [null];
-                    _pips.forEach((selectedProxyIp) => {
-                    let ipName = ipNameMap[ip] || "";
-
-                    if (isVless) {
-                        let tagStr = getConfigName(
-                            "alpha",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            selectedProxyIp,
-                            configIndex,
-                            ipName,
-                        );
-                        tagStr = getUniqueName(tagStr);
-                        dynamicTags.push(tagStr);
-
-                        let randomJunk = Array.from(
-                            { length: 11 },
-                            () =>
-                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                    Math.floor(Math.random() * 62)
-                                ],
-                        ).join("");
-                        let payloadVl = {
-                            junk: randomJunk,
-                            protocol: "vl",
-                            mode: "proxyip",
-                            panelIPs: [],
-                        };
-                        let pathStrVl = "/" + btoa(JSON.stringify(payloadVl));
-
-                        let configUuid = generateConfigUuid(p.id, configIndex);
-                        registerConfigEntry(
-                            configUuid,
-                            p.id,
-                            selectedProxyIp || "",
-                        );
-
-                        let ob = {
-                            type: k_vl_mode,
-                            tag: tagStr,
-                            server: ip,
-                            server_port: parseInt(port),
-                            tcp_fast_open: sysConfig.enableOpt1 || false,
-                            uuid: configUuid,
-                            packet_encoding: "xudp",
-                            network: "tcp",
-                            tls: {
-                                enabled: sec,
-                                server_name: hName,
-                                insecure: allowInsecure,
-                                ...(isSegEnabled(p) ? { fragment: true } : {}),
-                                alpn: ["http/1.1"],
-                                utls: {
-                                    enabled: true,
-                                    fingerprint: "randomized",
-                                },
-                            },
-                            transport: {
-                                type: "ws",
-                                path: pathStrVl,
-                                max_early_data: 2560,
-                                early_data_header_name:
-                                    "Sec-WebSocket-Protocol",
-                                headers: {
-                                    Host: hName,
-                                },
-                            },
-                        };
-                        outboundsArr.push(ob);
-                    }
-
-                    if (isTrojan) {
-                        let tagStr = getConfigName(
-                            "beta",
-                            p.name,
-                            port,
-                            hName,
-                            ip,
-                            selectedProxyIp,
-                            configIndex,
-                            ipName,
-                        );
-                        tagStr = getUniqueName(tagStr);
-                        dynamicTags.push(tagStr);
-
-                        let randomJunk = Array.from(
-                            { length: 11 },
-                            () =>
-                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                    Math.floor(Math.random() * 62)
-                                ],
-                        ).join("");
-                        let payloadTr = {
-                            junk: randomJunk,
-                            protocol: "tr",
-                            mode: "proxyip",
-                            panelIPs: [],
-                            relayIdx: configIndex,
-                        };
-                        let pathStrTr = "/" + btoa(JSON.stringify(payloadTr));
-
-                        let configUuid2 = generateConfigUuid(p.id, configIndex);
-                        registerConfigEntry(
-                            configUuid2,
-                            p.id,
-                            selectedProxyIp || "",
-                        );
-
-                        let ob = {
-                            type: k_tr_mode,
-                            tag: tagStr,
-                            server: ip,
-                            server_port: parseInt(port),
-                            tcp_fast_open: sysConfig.enableOpt1 || false,
-                            password: p.id,
-                            network: "tcp",
-                            tls: {
-                                enabled: sec,
-                                server_name: hName,
-                                insecure: allowInsecure,
-                                ...(isSegEnabled(p) ? { fragment: true } : {}),
-                                alpn: ["http/1.1"],
-                                utls: {
-                                    enabled: true,
-                                    fingerprint: "randomized",
-                                },
-                            },
-                            transport: {
-                                type: "ws",
-                                path: pathStrTr,
-                                max_early_data: 2560,
-                                early_data_header_name:
-                                    "Sec-WebSocket-Protocol",
-                                headers: {
-                                    Host: hName,
-                                },
-                            },
-                        };
-                        outboundsArr.push(ob);
-                    }
-                    configIndex++;
-                    if (sysConfig.enableDirectConfigs && pips.length > 0 && selectedProxyIp === pips[0]) {
-                        if (isVless) {
-                            let tagStr = getUniqueName(
-                                getConfigName(
-                                    "alpha",
-                                    p.name,
-                                    port,
-                                    hName,
-                                    ip,
-                                    null,
-                                    configIndex,
-                                    ipName, true
-                                ),
-                            );
-                            dynamicTags.push(tagStr);
-                            proxyGeoInfo.set(tagStr, getGeoInfo(ip));
-                            let randomJunk = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadVl = {
-                                junk: randomJunk,
-                                protocol: "vl",
-                                mode: "proxyip",
-                                panelIPs: [],
-                            };
-                            let pathStrVl =
-                                "/" + btoa(JSON.stringify(payloadVl));
-                            let configUuid = generateConfigUuid(
-                                p.id,
-                                configIndex,
-                            );
-                            registerConfigEntry(configUuid, p.id, "");
-                            let ob = {
-                                type: k_vl_mode,
-                                tag: tagStr,
-                                server: ip,
-                                server_port: parseInt(port),
-                                tcp_fast_open: sysConfig.enableOpt1 || false,
-                                uuid: configUuid,
-                                packet_encoding: "xudp",
-                                network: "tcp",
-                                tls: {
-                                    enabled: sec,
-                                    server_name: hName,
-                                    insecure: allowInsecure,
-                                    ...(isSegEnabled(p) ? { fragment: true } : {}),
-                                    alpn: ["http/1.1"],
-                                    utls: {
-                                        enabled: true,
-                                        fingerprint: "randomized",
-                                    },
-                                },
-                                transport: {
-                                    type: "ws",
-                                    path: pathStrVl,
-                                    max_early_data: 2560,
-                                    early_data_header_name:
-                                        "Sec-WebSocket-Protocol",
-                                    headers: { Host: hName },
-                                },
-                            };
-                            outboundsArr.push(ob);
-                        }
-                        if (isTrojan) {
-                            let tagStr = getUniqueName(
-                                getConfigName(
-                                    "beta",
-                                    p.name,
-                                    port,
-                                    hName,
-                                    ip,
-                                    null,
-                                    configIndex,
-                                    ipName, true
-                                ),
-                            );
-                            dynamicTags.push(tagStr);
-                            proxyGeoInfo.set(tagStr, getGeoInfo(ip));
-                            let randomJunk = Array.from(
-                                { length: 11 },
-                                () =>
-                                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[
-                                        Math.floor(Math.random() * 62)
-                                    ],
-                            ).join("");
-                            let payloadTr = {
-                                junk: randomJunk,
-                                protocol: "tr",
-                                mode: "proxyip",
-                                panelIPs: [],
-                                relayIdx: configIndex,
-                            };
-                            let pathStrTr =
-                                "/" + btoa(JSON.stringify(payloadTr));
-                            let configUuid2 = generateConfigUuid(
-                                p.id,
-                                configIndex,
-                            );
-                            let ob = {
-                                type: k_tr_mode,
-                                tag: tagStr,
-                                server: ip,
-                                server_port: parseInt(port),
-                                tcp_fast_open: sysConfig.enableOpt1 || false,
-                                password: p.id,
-                                network: "tcp",
-                                tls: {
-                                    enabled: sec,
-                                    server_name: hName,
-                                    insecure: allowInsecure,
-                                    ...(isSegEnabled(p) ? { fragment: true } : {}),
-                                    alpn: ["http/1.1"],
-                                    utls: {
-                                        enabled: true,
-                                        fingerprint: "randomized",
-                                    },
-                                },
-                                transport: {
-                                    type: "ws",
-                                    path: pathStrTr,
-                                    max_early_data: 2560,
-                                    early_data_header_name:
-                                        "Sec-WebSocket-Protocol",
-                                    headers: { Host: hName },
-                                },
-                            };
-                            outboundsArr.push(ob);
-                        }
-                        configIndex++;
-                    }
-                    });
-                });
-            });
-        });
-    });
-
-    if (dynamicTags.length === 0) {
-        dynamicTags.push("direct");
-    }
-
-    // ─── Upstream chaining: add detour to all outbounds ───
-    let parsedUpstream = parseVlessUri(sysConfig.upstreamUri);
-    let upstreamTag = "";
-    if (parsedUpstream) {
-        let upstreamOb = upstreamToSingboxOb(parsedUpstream);
-        upstreamTag = upstreamOb.tag;
-        // Add detour to all generated outbounds so they chain through upstream
-        outboundsArr.forEach(ob => {
-            if (ob.type !== "direct" && ob.type !== "block" && ob.type !== "dns") {
-                ob.detour = upstreamTag;
-            }
-        });
-        // Insert upstream as first outbound
-        outboundsArr.unshift(upstreamOb);
-    }
-    
-    await fetchTemplates(env);
-    if (singboxTemplate) {
-        let tpl = JSON.parse(JSON.stringify(singboxTemplate));
-        let newOutbounds = [];
-        let allProxies = outboundsArr.map(o => o.tag);
-        
-        for (let ob of tpl.outbounds) {
-            if (ob === "__OUTBOUNDS__") {
-                newOutbounds.push(...outboundsArr);
-            } else if (ob.outbounds && ob.outbounds.includes("{all_proxies}")) {
-                let obCpy = { ...ob };
-                obCpy.outbounds = [];
-                for (let tag of ob.outbounds) {
-                    if (tag === "{all_proxies}") obCpy.outbounds.push(...allProxies);
-                    else obCpy.outbounds.push(tag);
-                }
-                newOutbounds.push(obCpy);
-            } else {
-                newOutbounds.push(ob);
-            }
-        }
-        tpl.outbounds = newOutbounds;
-        return tpl;
-    }
-    // Fallback if template fails
+  } catch (错误116) {
     return {
-        log: { disabled: false, level: "warn", timestamp: true },
-        dns: { servers: [], rules: [] },
-        inbounds: [],
-        [k_obds]: outboundsArr,
-        route: { rules: [] }
+      error: 错误116
     };
+  }
+}
+function 关闭套接字值(套接字) {
+  try {
+    if (套接字.readyState === 1 || 套接字.readyState === 2) 套接字.close();
+  } catch (错误115) {}
+}
+const 十六进制值 = Array.from({
+  length: 256
+}, (取值, 索引值) => (索引值 + 256).toString(16).slice(1));
+function 处理格式值(本地值114, 偏移 = 0) {
+  const 标识 = (十六进制值[本地值114[偏移]] + 十六进制值[本地值114[偏移 + 1]] + 十六进制值[本地值114[偏移 + 2]] + 十六进制值[本地值114[偏移 + 3]] + "-" + 十六进制值[本地值114[偏移 + 4]] + 十六进制值[本地值114[偏移 + 5]] + "-" + 十六进制值[本地值114[偏移 + 6]] + 十六进制值[本地值114[偏移 + 7]] + "-" + 十六进制值[本地值114[偏移 + 8]] + 十六进制值[本地值114[偏移 + 9]] + "-" + 十六进制值[本地值114[偏移 + 10]] + 十六进制值[本地值114[偏移 + 11]] + 十六进制值[本地值114[偏移 + 12]] + 十六进制值[本地值114[偏移 + 13]] + 十六进制值[本地值114[偏移 + 14]] + 十六进制值[本地值114[偏移 + 15]]).toLowerCase();
+  if (!是否有效格式(标识)) throw new TypeError(错误_无效标识字符串);
+  return 标识;
+}
+async function 获取值解析新地址列表() {
+  const 网址113 = 优选地址源;
+  try {
+    const 网址列表112 = 网址113.includes(',') ? 网址113.split(',').map(网址值111 => 网址值111.trim()).filter(网址值 => 网址值) : [网址113];
+    const 接口结果列表 = await 获取优选接口(网址列表112, '443', 5000);
+    if (接口结果列表.length > 0) {
+      const 结果列表110 = [];
+      const 正则 = /^(\[[\da-fA-F:]+\]|[\d.]+|[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*)(?::(\d+))?(?:#(.+))?$/;
+      for (const 项目109 of 接口结果列表) {
+        const 本地值108 = 项目109.match(正则);
+        if (本地值108) {
+          结果列表110.push({
+            ip: 规范化节点主机(本地值108[1]),
+            port: parseInt(本地值108[2] || '443', 10),
+            name: 本地值108[3]?.trim() || 本地值108[1]
+          });
+        }
+      }
+      return 结果列表110;
+    }
+    const 响应107 = await fetch(网址113);
+    if (!响应107.ok) return [];
+    const 文本106 = await 响应107.text();
+    const 结果列表105 = [];
+    const 行列表104 = 文本106.trim().replace(/\r/g, "").split('\n');
+    const 值正则 = /^([^:]+):(\d+)#(.*)$/;
+    for (const 行103 of 行列表104) {
+      const 值行 = 行103.trim();
+      if (!值行) continue;
+      const 本地值102 = 值行.match(值正则);
+      if (本地值102) {
+        结果列表105.push({
+          ip: 本地值102[1],
+          port: parseInt(本地值102[2], 10),
+          name: 本地值102[3].trim() || 本地值102[1]
+        });
+      }
+    }
+    return 结果列表105;
+  } catch (错误101) {
+    return [];
+  }
+}
+function 生成链接列表来源新地址列表(列表100, 用户99, 工作器域名98, 加密客户端问候配置97 = null, 跳过编号96 = false, 别名命名器95 = null) {
+  const 云墙超文本端口94 = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+  const 云墙安全超文本端口93 = [443, 2053, 2083, 2087, 2096, 8443];
+  const 链接列表92 = [];
+  const 网页套接字路径91 = '/?ed=2048';
+  const 协议 = atob('dmxlc3M=');
+  const 制作节点名称90 = 别名命名器95 || 创建值节点命名器(跳过编号96);
+  for (const 项目89 of 列表100) {
+    const 端口88 = 项目89.port;
+    const 安全地址87 = 项目89.ip.includes(':') ? `[${项目89.ip}]` : 项目89.ip;
+    if (云墙安全超文本端口93.includes(端口88)) {
+      const 网页套接字节点名称86 = 制作节点名称90(项目89);
+      let 链接85 = `${协议}://${用户99}@${安全地址87}:${端口88}?encryption=none&security=tls&sni=${工作器域名98}&fp=chrome&type=ws&host=${工作器域名98}&path=${网页套接字路径91}`;
+      if (自定义应用层协议协商) 链接85 += `&alpn=${encodeURIComponent(自定义应用层协议协商)}`;
+
+      // 如果启用了ECH，添加ech参数（ECH需要伪装成Chrome浏览器）
+      if (启用加密客户端问候) {
+        const 域名系统值84 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+        const 加密客户端问候域名83 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+        链接85 += `&ech=${encodeURIComponent(`${加密客户端问候域名83}+${域名系统值84}`)}`;
+      }
+      链接85 += `#${encodeURIComponent(网页套接字节点名称86)}`;
+      链接列表92.push(链接85);
+    } else if (云墙超文本端口94.includes(端口88)) {
+      if (!禁用非传输层安全) {
+        const 网页套接字节点名称82 = 制作节点名称90(项目89);
+        const 链接81 = `${协议}://${用户99}@${安全地址87}:${端口88}?encryption=none&security=none&type=ws&host=${工作器域名98}&path=${网页套接字路径91}#${encodeURIComponent(网页套接字节点名称82)}`;
+        链接列表92.push(链接81);
+      }
+    } else {
+      const 网页套接字节点名称80 = 制作节点名称90(项目89);
+      let 链接79 = `${协议}://${用户99}@${安全地址87}:${端口88}?encryption=none&security=tls&sni=${工作器域名98}&fp=chrome&type=ws&host=${工作器域名98}&path=${网页套接字路径91}`;
+      if (自定义应用层协议协商) 链接79 += `&alpn=${encodeURIComponent(自定义应用层协议协商)}`;
+
+      // 如果启用了ECH，添加ech参数（ECH需要伪装成Chrome浏览器）
+      if (启用加密客户端问候) {
+        const 域名系统值78 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+        const 加密客户端问候域名77 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+        链接79 += `&ech=${encodeURIComponent(`${加密客户端问候域名77}+${域名系统值78}`)}`;
+      }
+      链接79 += `#${encodeURIComponent(网页套接字节点名称80)}`;
+      链接列表92.push(链接79);
+    }
+  }
+  return 链接列表92;
+}
+function 生成扩展超文本链接列表来源源(列表76, 用户75, 工作器域名74, 加密客户端问候配置73 = null, 跳过编号72 = false, 别名命名器71 = null) {
+  const 链接列表70 = [];
+  const 节点路径 = 用户75.substring(0, 8);
+  const 制作节点名称69 = 别名命名器71 || 创建值节点命名器(跳过编号72);
+  for (const 项目68 of 列表76) {
+    const 安全地址67 = 项目68.ip.includes(':') ? `[${项目68.ip}]` : 项目68.ip;
+    const 端口66 = 项目68.port || 443;
+    const 网页套接字节点名称65 = 制作节点名称69(项目68);
+    const 参数 = new URLSearchParams({
+      encryption: 'none',
+      security: 'tls',
+      sni: 工作器域名74,
+      fp: 'chrome',
+      type: 'xhttp',
+      host: 工作器域名74,
+      path: `/${节点路径}`,
+      mode: 'stream-one'
+    });
+    const { 头: 叉填充头65, 键: 叉填充键65 } = 获取叉HTTP填充标识(用户75);
+    参数.set('extra', JSON.stringify({
+      xPaddingObfsMode: true,
+      xPaddingMethod: 'tokenish',
+      xPaddingPlacement: 'queryInHeader',
+      xPaddingHeader: 叉填充头65,
+      xPaddingKey: 叉填充键65
+    }));
+    处理值应用层协议协商值(参数);
+    if (启用加密客户端问候) {
+      const 域名系统值64 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+      const 加密客户端问候域名63 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+      参数.set('ech', `${加密客户端问候域名63}+${域名系统值64}`);
+    }
+    链接列表70.push(`${解码64('dmxlc3M6Ly8=')}${用户75}@${安全地址67}:${端口66}?${参数.toString()}#${encodeURIComponent(网页套接字节点名称65)}`);
+  }
+  return 链接列表70;
+}
+async function 生成木马链接列表来源新地址列表(列表, 用户, 工作器域名, 加密客户端问候配置 = null, 跳过编号 = false, 别名命名器 = null) {
+  const 云墙超文本端口 = [80, 8080, 8880, 2052, 2082, 2086, 2095];
+  const 云墙安全超文本端口 = [443, 2053, 2083, 2087, 2096, 8443];
+  const 链接列表 = [];
+  const 网页套接字路径 = '/?ed=2048';
+  const 密码 = 传输路径 || 用户;
+  const 制作节点名称 = 别名命名器 || 创建值节点命名器(跳过编号);
+  for (const 项目62 of 列表) {
+    const 端口61 = 项目62.port;
+    const 安全地址 = 项目62.ip.includes(':') ? `[${项目62.ip}]` : 项目62.ip;
+    if (云墙安全超文本端口.includes(端口61)) {
+      const 网页套接字节点名称60 = 制作节点名称(项目62);
+      let 链接59 = `${atob('dHJvamFuOi8v')}${密码}@${安全地址}:${端口61}?security=tls&sni=${工作器域名}&fp=chrome&type=ws&host=${工作器域名}&path=${网页套接字路径}`;
+      if (自定义应用层协议协商) 链接59 += `&alpn=${encodeURIComponent(自定义应用层协议协商)}`;
+
+      // 如果启用了ECH，添加ech参数（ECH需要伪装成Chrome浏览器）
+      if (启用加密客户端问候) {
+        const 域名系统值58 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+        const 加密客户端问候域名57 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+        链接59 += `&ech=${encodeURIComponent(`${加密客户端问候域名57}+${域名系统值58}`)}`;
+      }
+      链接59 += `#${encodeURIComponent(网页套接字节点名称60)}`;
+      链接列表.push(链接59);
+    } else if (云墙超文本端口.includes(端口61)) {
+      if (!禁用非传输层安全) {
+        const 网页套接字节点名称56 = 制作节点名称(项目62);
+        const 链接55 = `${atob('dHJvamFuOi8v')}${密码}@${安全地址}:${端口61}?security=none&type=ws&host=${工作器域名}&path=${网页套接字路径}#${encodeURIComponent(网页套接字节点名称56)}`;
+        链接列表.push(链接55);
+      }
+    } else {
+      const 网页套接字节点名称 = 制作节点名称(项目62);
+      let 链接 = `${atob('dHJvamFuOi8v')}${密码}@${安全地址}:${端口61}?security=tls&sni=${工作器域名}&fp=chrome&type=ws&host=${工作器域名}&path=${网页套接字路径}`;
+      if (自定义应用层协议协商) 链接 += `&alpn=${encodeURIComponent(自定义应用层协议协商)}`;
+
+      // 如果启用了ECH，添加ech参数（ECH需要伪装成Chrome浏览器）
+      if (启用加密客户端问候) {
+        const 域名系统值 = 自定义域名系统 || 'https://223.5.5.5/dns-query';
+        const 加密客户端问候域名 = 自定义加密客户端问候域名 || 'cloudflare-ech.com';
+        链接 += `&ech=${encodeURIComponent(`${加密客户端问候域名}+${域名系统值}`)}`;
+      }
+      链接 += `#${encodeURIComponent(网页套接字节点名称)}`;
+      链接列表.push(链接);
+    }
+  }
+  return 链接列表;
+}
+async function 处理配置接口(请求54, 环境值 = {}) {
+  if (请求54.method === 'GET') {
+    if (!键值存储) {
+      return new Response(JSON.stringify({
+        error: 'KV存储未配置',
+        kvEnabled: false
+      }), {
+        status: 503,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+    return new Response(JSON.stringify({
+      ...获取有效配置快照(环境值),
+      kvEnabled: true
+    }), {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  } else if (请求54.method === 'POST') {
+    if (!键值存储) {
+      return new Response(JSON.stringify({
+        success: false,
+        message: 'KV存储未配置，无法保存配置'
+      }), {
+        status: 503,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+    try {
+      const 新配置 = await 请求54.json();
+      for (const [键, 值] of Object.entries(新配置)) {
+        if (值 === '' || 值 === null || 值 === undefined) {
+          delete 键值配置[键];
+        } else {
+          键值配置[键] = 值;
+        }
+      }
+      await 保存键值配置();
+      更新配置值();
+      if (新配置.yx !== undefined) {
+        更新自定义优选来源值();
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        message: '配置已保存',
+        config: 获取有效配置快照(环境值)
+      }), {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    } catch (错误53) {
+      return new Response(JSON.stringify({
+        success: false,
+        message: '保存配置失败: ' + 错误53.message
+      }), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+  }
+  return new Response(JSON.stringify({
+    error: 'Method not allowed'
+  }), {
+    status: 405,
+    headers: {
+      'Content-Type': 'application/json'
+    }
+  });
+}
+async function 处理优选地址列表接口(请求) {
+  if (!键值存储) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'KV存储未配置',
+      message: '需要配置KV存储才能使用此功能'
+    }), {
+      status: 503,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+  const 本地值52 = 获取配置值('ae', '') === 'yes';
+  if (!本地值52) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: 'API功能未启用',
+      message: '出于安全考虑，优选IP API功能默认关闭。请在配置管理页面开启"允许API管理"选项后使用。'
+    }), {
+      status: 403,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+  try {
+    if (请求.method === 'GET') {
+      const 值值51 = 获取配置值('yx', '');
+      const 本地值50 = 解析值值数组(值值51);
+      return new Response(JSON.stringify({
+        success: true,
+        count: 本地值50.length,
+        data: 本地值50
+      }), {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    } else if (请求.method === 'POST') {
+      const 主体49 = await 请求.json();
+      const 地址列表值添加 = Array.isArray(主体49) ? 主体49 : [主体49];
+      if (地址列表值添加.length === 0) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: '请求数据为空',
+          message: '请提供IP数据'
+        }), {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+      }
+      const 值值48 = 获取配置值('yx', '');
+      let 本地值47 = 解析值值数组(值值48);
+      const 值地址列表46 = [];
+      const 值地址列表45 = [];
+      const 错误列表 = [];
+      for (const 项目44 of 地址列表值添加) {
+        if (!项目44.ip) {
+          错误列表.push({
+            ip: '未知',
+            reason: 'IP地址是必需的'
+          });
+          continue;
+        }
+        const 端口43 = 项目44.port || 443;
+        const 名称 = 项目44.name || `API优选-${项目44.ip}:${端口43}`;
+        if (!是否有效地址(项目44.ip) && !是否有效域名(项目44.ip)) {
+          错误列表.push({
+            ip: 项目44.ip,
+            reason: '无效的IP或域名格式'
+          });
+          continue;
+        }
+        const 本地值42 = 本地值47.some(值项目 => 值项目.ip === 项目44.ip && 值项目.port === 端口43);
+        if (本地值42) {
+          值地址列表45.push({
+            ip: 项目44.ip,
+            port: 端口43,
+            reason: '已存在'
+          });
+          continue;
+        }
+        const 新地址 = {
+          ip: 项目44.ip,
+          port: 端口43,
+          name: 名称,
+          addedAt: new Date().toISOString()
+        };
+        本地值47.push(新地址);
+        值地址列表46.push(新地址);
+      }
+      if (值地址列表46.length > 0) {
+        const 新值值41 = 处理数组值值(本地值47);
+        await 设置配置值('yx', 新值值41);
+        更新自定义优选来源值();
+      }
+      return new Response(JSON.stringify({
+        success: 值地址列表46.length > 0,
+        message: `成功添加 ${值地址列表46.length} 个IP`,
+        added: 值地址列表46.length,
+        skipped: 值地址列表45.length,
+        errors: 错误列表.length,
+        data: {
+          addedIPs: 值地址列表46,
+          skippedIPs: 值地址列表45.length > 0 ? 值地址列表45 : undefined,
+          errors: 错误列表.length > 0 ? 错误列表 : undefined
+        }
+      }), {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    } else if (请求.method === 'DELETE') {
+      const 主体 = await 请求.json();
+      if (主体.all === true) {
+        const 值值40 = 获取配置值('yx', '');
+        const 本地值39 = 解析值值数组(值值40);
+        const 值数量 = 本地值39.length;
+        await 设置配置值('yx', '');
+        更新自定义优选来源值();
+        return new Response(JSON.stringify({
+          success: true,
+          message: `已清空所有优选IP，共删除 ${值数量} 个`,
+          deletedCount: 值数量
+        }), {
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+      }
+      if (!主体.ip) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'IP地址是必需的',
+          message: '请提供要删除的ip字段，或使用 {"all": true} 清空所有'
+        }), {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+      }
+      const 端口38 = 主体.port || 443;
+      const 值值37 = 获取配置值('yx', '');
+      let 本地值36 = 解析值值数组(值值37);
+      const 值长度 = 本地值36.length;
+      const 值地址列表 = 本地值36.filter(项目35 => !(项目35.ip === 主体.ip && 项目35.port === 端口38));
+      if (值地址列表.length === 值长度) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: '优选IP不存在',
+          message: `${主体.ip}:${端口38} 未找到`
+        }), {
+          status: 404,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+      }
+      const 新值值 = 处理数组值值(值地址列表);
+      await 设置配置值('yx', 新值值);
+      更新自定义优选来源值();
+      return new Response(JSON.stringify({
+        success: true,
+        message: '优选IP已删除',
+        deleted: {
+          ip: 主体.ip,
+          port: 端口38
+        }
+      }), {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    } else {
+      return new Response(JSON.stringify({
+        success: false,
+        error: '不支持的请求方法',
+        message: '支持的方法: GET, POST, DELETE'
+      }), {
+        status: 405,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+  } catch (错误34) {
+    return new Response(JSON.stringify({
+      success: false,
+      error: '处理请求失败',
+      message: 错误34.message
+    }), {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+}
+function 更新配置值() {
+  const 有效配置 = 获取有效配置快照();
+  const 手动地区 = 有效配置.wk;
+  if (手动地区 && 手动地区.trim()) {
+    手动工作器地区 = 手动地区.trim().toUpperCase();
+    当前工作器地区 = 手动工作器地区;
+  } else {
+    const 本地值 = 有效配置.p;
+    if (本地值 && 本地值.trim()) {
+      当前工作器地区 = 'CUSTOM';
+    } else {
+      手动工作器地区 = '';
+      当前工作器地区 = '';
+    }
+  }
+  启用地区匹配 = !(有效配置.rm && 有效配置.rm.toLowerCase() === 'no');
+  启用明文 = 有效配置.ev === 'yes';
+  启用木马 = 有效配置.et === 'yes';
+  启用扩展传输 = 有效配置.ex === 'yes';
+  传输路径 = 有效配置.tp || '';
+  订阅转换接口 = 有效配置.scu || 配置默认值.scu;
+  启用优选域名 = 有效配置.epd === 'yes';
+  启用优选地址 = 有效配置.epi === 'yes';
+  启用仓库优选 = 有效配置.egi === 'yes';
+  启用原生地址 = 有效配置.ena === 'yes';
+  启用家宽链式 = 有效配置.jk === 'yes';
+  启用加密客户端问候 = 有效配置.ech === 'yes';
+  自定义域名系统 = 有效配置.customDNS || 配置默认值.customDNS;
+  自定义加密客户端问候域名 = 有效配置.customECHDomain || 配置默认值.customECHDomain;
+  自定义应用层协议协商 = 规范化应用层协议协商(有效配置.alpn || '');
+  禁用非传输层安全 = 有效配置.dkby === 'yes' || 启用加密客户端问候;
+  const 降级控制值 = (有效配置.qj || '').toLowerCase();
+  启用代理降级 = 降级控制值 === 'no';
+  仅走代理 = 降级控制值 === 'only';
+  自定义路径 = 有效配置.d || '';
+  优选地址源 = 有效配置.yxURL || '';
+  回退地址 = 有效配置.p ? 有效配置.p.trim() : '';
+  代理5配置 = 有效配置.s || '';
+  if (代理5配置) {
+    try {
+      已解析代理5配置 = 解析代理配置(代理5配置);
+      是否代理已启用 = true;
+    } catch (错误31) {
+      是否代理已启用 = false;
+    }
+  } else {
+    已解析代理5配置 = {};
+    是否代理已启用 = false;
+  }
+  禁用优选 = !!(有效配置.yxby && 有效配置.yxby.toLowerCase() === 'yes');
+}
+function 更新自定义优选来源值() {
+  const 值值30 = 获取配置值('yx', '');
+  if (值值30) {
+    try {
+      const 优选列表 = 值值30.split(',').map(项目29 => 项目29.trim()).filter(项目28 => 项目28);
+      自定义优选地址列表 = [];
+      自定义优选域名列表 = [];
+      优选列表.forEach(项目27 => {
+        let 节点名称26 = '';
+        let 地址部分25 = 项目27;
+        if (项目27.includes('#')) {
+          const 部分列表24 = 项目27.split('#');
+          地址部分25 = 部分列表24[0].trim();
+          节点名称26 = 部分列表24[1].trim();
+        }
+        const {
+          address: 地址23,
+          port: 端口22
+        } = 解析地址值端口(地址部分25);
+        if (!节点名称26) {
+          节点名称26 = '自定义优选-' + 地址23 + (端口22 ? ':' + 端口22 : '');
+        }
+        if (是否有效地址(地址23)) {
+          自定义优选地址列表.push({
+            ip: 地址23,
+            port: 端口22,
+            isp: 节点名称26
+          });
+        } else {
+          自定义优选域名列表.push({
+            domain: 地址23,
+            port: 端口22,
+            name: 节点名称26
+          });
+        }
+      });
+    } catch (错误) {
+      自定义优选地址列表 = [];
+      自定义优选域名列表 = [];
+    }
+  } else {
+    自定义优选地址列表 = [];
+    自定义优选域名列表 = [];
+  }
+}
+function 解析值值数组(值值) {
+  if (!值值 || !值值.trim()) return [];
+  const 项目列表 = 值值.split(',').map(项目21 => 项目21.trim()).filter(项目20 => 项目20);
+  const 结果 = [];
+  for (const 项目19 of 项目列表) {
+    let 节点名称 = '';
+    let 地址部分 = 项目19;
+    if (项目19.includes('#')) {
+      const 部分列表 = 项目19.split('#');
+      地址部分 = 部分列表[0].trim();
+      节点名称 = 部分列表[1].trim();
+    }
+    const {
+      address: 地址,
+      port: 端口18
+    } = 解析地址值端口(地址部分);
+    if (!节点名称) {
+      节点名称 = 地址 + (端口18 ? ':' + 端口18 : '');
+    }
+    结果.push({
+      ip: 地址,
+      port: 端口18 || 443,
+      name: 节点名称,
+      addedAt: new Date().toISOString()
+    });
+  }
+  return 结果;
+}
+function 处理数组值值(数组) {
+  if (!数组 || 数组.length === 0) return '';
+  return 数组.map(项目 => {
+    const 端口17 = 项目.port || 443;
+    return `${项目.ip}:${端口17}#${项目.name}`;
+  }).join(',');
+}
+function 是否有效域名(域名) {
+  const 域名正则 = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
+  return 域名正则.test(域名);
+}
+async function 解析文本值数组(内容) {
+  var 已处理 = 内容.replace(/[	"'\r\n]+/g, ',').replace(/,+/g, ',');
+  if (已处理.charAt(0) == ',') 已处理 = 已处理.slice(1);
+  if (已处理.charAt(已处理.length - 1) == ',') 已处理 = 已处理.slice(0, 已处理.length - 1);
+  return 已处理.split(',');
+}
+async function 获取优选接口(网址列表, 默认端口 = '443', 超时 = 3000) {
+  if (!网址列表?.length) return [];
+  const 结果列表 = new Set();
+  await Promise.allSettled(网址列表.map(async 网址 => {
+    try {
+      const 控制器 = new AbortController();
+      const 超时标识 = setTimeout(() => 控制器.abort(), 超时);
+      const 响应 = await fetch(网址, {
+        signal: 控制器.signal
+      });
+      clearTimeout(超时标识);
+      let 文本 = '';
+      try {
+        const 缓冲 = await 响应.arrayBuffer();
+        const 内容类型 = (响应.headers.get('content-type') || '').toLowerCase();
+        const 字符集 = 内容类型.match(/charset=([^\s;]+)/i)?.[1]?.toLowerCase() || '';
+        let 解码器列表 = ['utf-8', 'gb2312'];
+        if (字符集.includes('gb') || 字符集.includes('gbk') || 字符集.includes('gb2312')) {
+          解码器列表 = ['gb2312', 'utf-8'];
+        }
+        let 解码成功 = false;
+        for (const 解码器 of 解码器列表) {
+          try {
+            const 已解码 = new TextDecoder(解码器).decode(缓冲);
+            if (已解码 && 已解码.length > 0 && !已解码.includes('\ufffd')) {
+              文本 = 已解码;
+              解码成功 = true;
+              break;
+            } else if (已解码 && 已解码.length > 0) {
+              continue;
+            }
+          } catch (事件值16) {
+            continue;
+          }
+        }
+        if (!解码成功) {
+          文本 = await 响应.text();
+        }
+        if (!文本 || 文本.trim().length === 0) {
+          return;
+        }
+      } catch (事件值15) {
+        return;
+      }
+      const 行列表 = 文本.trim().split('\n').map(行值14 => 行值14.trim()).filter(行值 => 行值);
+      const 是否值 = 行列表.length > 1 && 行列表[0].includes(',');
+      const 六版地址模式 = /^[^\[\]]*:[^\[\]]*:[^\[\]]/;
+      if (!是否值) {
+        行列表.forEach(行13 => {
+          const 井号索引 = 行13.indexOf('#');
+          const [主机部分, 备注] = 井号索引 > -1 ? [行13.substring(0, 井号索引), 行13.substring(井号索引)] : [行13, ''];
+          let 是否有端口 = false;
+          if (主机部分.startsWith('[')) {
+            是否有端口 = /\]:(\d+)$/.test(主机部分);
+          } else {
+            const 值索引 = 主机部分.lastIndexOf(':');
+            是否有端口 = 值索引 > -1 && /^\d+$/.test(主机部分.substring(值索引 + 1));
+          }
+          const 端口12 = new URL(网址).searchParams.get('port') || 默认端口;
+          结果列表.add(是否有端口 ? 行13 : `${主机部分}:${端口12}${备注}`);
+        });
+      } else {
+        const 头部列表 = 行列表[0].split(',').map(头值11 => 头值11.trim());
+        const 数据行列表 = 行列表.slice(1);
+        if (头部列表.includes('IP地址') && 头部列表.includes('端口') && 头部列表.includes('数据中心')) {
+          const 地址索引10 = 头部列表.indexOf('IP地址'),
+            端口索引 = 头部列表.indexOf('端口');
+          const 备注索引 = 头部列表.indexOf('国家') > -1 ? 头部列表.indexOf('国家') : 头部列表.indexOf('城市') > -1 ? 头部列表.indexOf('城市') : 头部列表.indexOf('数据中心');
+          const 传输层安全索引 = 头部列表.indexOf('TLS');
+          数据行列表.forEach(行9 => {
+            const 列列表8 = 行9.split(',').map(丙值7 => 丙值7.trim());
+            if (传输层安全索引 !== -1 && 列列表8[传输层安全索引]?.toLowerCase() !== 'true') return;
+            const 包裹地址6 = 六版地址模式.test(列列表8[地址索引10]) ? `[${列列表8[地址索引10]}]` : 列列表8[地址索引10];
+            结果列表.add(`${包裹地址6}:${列列表8[端口索引]}#${列列表8[备注索引]}`);
+          });
+        } else if (头部列表.some(头值5 => 头值5.includes('IP')) && 头部列表.some(头值4 => 头值4.includes('延迟')) && 头部列表.some(头值3 => 头值3.includes('下载速度'))) {
+          const 地址索引 = 头部列表.findIndex(头值2 => 头值2.includes('IP'));
+          const 延迟索引 = 头部列表.findIndex(头值1 => 头值1.includes('延迟'));
+          const 速度索引 = 头部列表.findIndex(头值 => 头值.includes('下载速度'));
+          const 端口 = new URL(网址).searchParams.get('port') || 默认端口;
+          数据行列表.forEach(行 => {
+            const 列列表 = 行.split(',').map(丙值 => 丙值.trim());
+            const 包裹地址 = 六版地址模式.test(列列表[地址索引]) ? `[${列列表[地址索引]}]` : 列列表[地址索引];
+            结果列表.add(`${包裹地址}:${端口}#CF优选 ${列列表[延迟索引]}ms ${列列表[速度索引]}MB/s`);
+          });
+        }
+      }
+    } catch (事件值) {}
+  }));
+  return Array.from(结果列表);
 }
